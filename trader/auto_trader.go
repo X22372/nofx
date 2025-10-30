@@ -32,6 +32,7 @@ type AutoTraderConfig struct {
 
 	// Hyperliquid配置
 	HyperliquidPrivateKey string
+	HyperliquidWalletAddr string
 	HyperliquidTestnet    bool
 
 	// Aster配置
@@ -69,21 +70,21 @@ type AutoTraderConfig struct {
 
 // AutoTrader 自动交易器
 type AutoTrader struct {
-	id                    string // Trader唯一标识
-	name                  string // Trader显示名称
-	aiModel               string // AI模型名称
-	exchange              string // 交易平台名称
-	config                AutoTraderConfig
-	trader                Trader                 // 使用Trader接口（支持多平台）
-	decisionLogger        *logger.DecisionLogger // 决策日志记录器
-	initialBalance        float64
-	dailyPnL              float64
-	lastResetTime         time.Time
-	stopUntil             time.Time
-	isRunning             bool
-	startTime             time.Time        // 系统启动时间
-	callCount             int              // AI调用次数
-	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
+	id                   string                 // Trader唯一标识
+	name                 string                 // Trader显示名称
+	aiModel              string                 // AI模型名称
+	exchange             string                 // 交易平台名称
+	config               AutoTraderConfig
+	trader               Trader                 // 使用Trader接口（支持多平台）
+	decisionLogger       *logger.DecisionLogger // 决策日志记录器
+	initialBalance       float64
+	dailyPnL             float64
+	lastResetTime        time.Time
+	stopUntil            time.Time
+	isRunning            bool
+	startTime            time.Time                 // 系统启动时间
+	callCount            int                       // AI调用次数
+	positionFirstSeenTime map[string]int64         // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 }
 
 // NewAutoTrader 创建自动交易器
@@ -148,9 +149,6 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		if err != nil {
 			return nil, fmt.Errorf("初始化Aster交易器失败: %w", err)
 		}
-	case "bitget":
-		log.Printf("🏦 [%s] 使用Aster交易", config.Name)
-		trader = NewBitgetTrader(config.BitgetApiKey, config.BitgetSecretKey)
 	default:
 		return nil, fmt.Errorf("不支持的交易平台: %s", config.Exchange)
 	}
@@ -165,18 +163,18 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
 	return &AutoTrader{
-		id:                    config.ID,
-		name:                  config.Name,
-		aiModel:               config.AIModel,
-		exchange:              config.Exchange,
-		config:                config,
-		trader:                trader,
-		decisionLogger:        decisionLogger,
-		initialBalance:        config.InitialBalance,
-		lastResetTime:         time.Now(),
-		startTime:             time.Now(),
-		callCount:             0,
-		isRunning:             false,
+		id:                   config.ID,
+		name:                 config.Name,
+		aiModel:              config.AIModel,
+		exchange:             config.Exchange,
+		config:               config,
+		trader:               trader,
+		decisionLogger:       decisionLogger,
+		initialBalance:       config.InitialBalance,
+		lastResetTime:        time.Now(),
+		startTime:            time.Now(),
+		callCount:            0,
+		isRunning:            false,
 		positionFirstSeenTime: make(map[string]int64),
 	}, nil
 }
@@ -521,11 +519,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 	// 6. 构建上下文
 	ctx := &decision.Context{
-		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
-		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
-		CallCount:       at.callCount,
-		BTCETHLeverage:  at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
-		AltcoinLeverage: at.config.AltcoinLeverage, // 使用配置的杠杆倍数
+		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
+		CallCount:        at.callCount,
+		BTCETHLeverage:   at.config.BTCETHLeverage,   // 使用配置的杠杆倍数
+		AltcoinLeverage:  at.config.AltcoinLeverage,  // 使用配置的杠杆倍数
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
