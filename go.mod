@@ -3,10 +3,12 @@ module nofx
 go 1.25.0
 
 require (
+	bitget v0.0.0-00010101000000-000000000000
 	github.com/adshao/go-binance/v2 v2.8.7
 	github.com/ethereum/go-ethereum v1.16.5
 	github.com/gin-gonic/gin v1.11.0
 	github.com/sonirico/go-hyperliquid v0.17.0
+	github.com/spf13/cast v1.10.0
 )
 
 require (
@@ -50,6 +52,7 @@ require (
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/quic-go/quic-go v0.54.0 // indirect
+	github.com/robfig/cron v1.2.0 // indirect
 	github.com/rs/zerolog v1.34.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sonirico/vago v0.9.0 // indirect
@@ -63,7 +66,10 @@ require (
 	go.elastic.co/apm/module/apmzerolog/v2 v2.7.1 // indirect
 	go.elastic.co/apm/v2 v2.7.1 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect
+	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/mock v0.5.0 // indirect
+	go.uber.org/multierr v1.6.0 // indirect
+	go.uber.org/zap v1.19.1 // indirect
 	golang.org/x/arch v0.20.0 // indirect
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
@@ -75,3 +81,5 @@ require (
 	google.golang.org/protobuf v1.36.9 // indirect
 	howett.net/plist v1.0.1 // indirect
 )
+
+replace bitget => ./bitget-golang-sdk-api

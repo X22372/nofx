@@ -223,8 +223,9 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("1. **风险回报比**: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
-		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
-	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n\n")
+		accountEquity*0.8, accountEquity*1.2, altcoinLeverage, accountEquity*3, accountEquity*6, btcEthLeverage))
+	sb.WriteString("4. **保证金**: 总使用率 ≤ 50%\n")
+	sb.WriteString("5. **RSI6**: 高于80才是超买，低于20才是超卖\n\n")
 
 	// === 做空激励 ===
 	sb.WriteString("# 📉 做多做空平衡\n\n")
@@ -248,8 +249,8 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("# 🎯 开仓标准（严格）\n\n")
 	sb.WriteString("只在**强信号**时开仓，不确定就观望。\n\n")
 	sb.WriteString("**你拥有的完整数据**：\n")
-	sb.WriteString("- 📊 **原始序列**：3分钟价格序列(MidPrices数组) + 4小时K线序列\n")
-	sb.WriteString("- 📈 **技术序列**：EMA20序列、MACD序列、RSI7序列、RSI14序列\n")
+	sb.WriteString("- 📊 **原始序列**：5分钟价格序列(MidPrices数组) + 4小时K线序列\n")
+	sb.WriteString("- 📈 **技术序列**：EMA20序列、MACD序列、RSI6序列、RSI14序列\n")
 	sb.WriteString("- 💰 **资金序列**：成交量序列、持仓量(OI)序列、资金费率\n")
 	sb.WriteString("- 🎯 **筛选标记**：AI500评分 / OI_Top排名（如果有标注）\n\n")
 	sb.WriteString("**分析方法**（完全由你自主决定）：\n")
@@ -267,7 +268,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("# 🧬 夏普比率自我进化\n\n")
 	sb.WriteString("每次你会收到**夏普比率**作为绩效反馈（周期级别）：\n\n")
 	sb.WriteString("**夏普比率 < -0.5** (持续亏损):\n")
-	sb.WriteString("  → 🛑 停止交易，连续观望至少6个周期（18分钟）\n")
+	sb.WriteString("  → 🛑 停止交易，连续观望至少6个周期（30分钟）\n")
 	sb.WriteString("  → 🔍 深度反思：\n")
 	sb.WriteString("     • 交易频率过高？（每小时>2次就是过度）\n")
 	sb.WriteString("     • 持仓时间过短？（<30分钟就是过早平仓）\n")
@@ -327,7 +328,7 @@ func buildUserPrompt(ctx *Context) string {
 	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
 		sb.WriteString(fmt.Sprintf("**BTC**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
 			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
-			btcData.CurrentMACD, btcData.CurrentRSI7))
+			btcData.CurrentMACD, btcData.CurrentRSI6))
 	}
 
 	// 账户

@@ -18,7 +18,7 @@ type Data struct {
 	PriceChange4h     float64 // 4小时价格变化百分比
 	CurrentEMA20      float64
 	CurrentMACD       float64
-	CurrentRSI7       float64
+	CurrentRSI6       float64
 	OpenInterest      *OIData
 	FundingRate       float64
 	IntradaySeries    *IntradayData
@@ -31,12 +31,12 @@ type OIData struct {
 	Average float64
 }
 
-// IntradayData 日内数据(3分钟间隔)
+// IntradayData 日内数据(5分钟间隔)
 type IntradayData struct {
 	MidPrices   []float64
 	EMA20Values []float64
 	MACDValues  []float64
-	RSI7Values  []float64
+	RSI6Values  []float64
 	RSI14Values []float64
 }
 
@@ -68,10 +68,10 @@ func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
 
-	// 获取3分钟K线数据 (最近10个)
-	klines3m, err := getKlines(symbol, "3m", 40) // 多获取一些用于计算
+	// 获取5分钟K线数据 (最近10个)
+	klines5m, err := getKlines(symbol, "5m", 40) // 多获取一些用于计算
 	if err != nil {
-		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
+		return nil, fmt.Errorf("获取5分钟K线失败: %v", err)
 	}
 
 	// 获取4小时K线数据 (最近10个)
@@ -80,17 +80,17 @@ func Get(symbol string) (*Data, error) {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
 	}
 
-	// 计算当前指标 (基于3分钟最新数据)
-	currentPrice := klines3m[len(klines3m)-1].Close
-	currentEMA20 := calculateEMA(klines3m, 20)
-	currentMACD := calculateMACD(klines3m)
-	currentRSI7 := calculateRSI(klines3m, 7)
+	// 计算当前指标 (基于5分钟最新数据)
+	currentPrice := klines5m[len(klines5m)-1].Close
+	currentEMA20 := calculateEMA(klines5m, 20)
+	currentMACD := calculateMACD(klines5m)
+	currentRSI6 := calculateRSI(klines5m, 6)
 
 	// 计算价格变化百分比
-	// 1小时价格变化 = 20个3分钟K线前的价格
+	// 1小时价格变化 = 12个5分钟K线前的价格
 	priceChange1h := 0.0
-	if len(klines3m) >= 21 { // 至少需要21根K线 (当前 + 20根前)
-		price1hAgo := klines3m[len(klines3m)-21].Close
+	if len(klines5m) >= 13 { // 至少需要21根K线 (当前 + 20根前)
+		price1hAgo := klines5m[len(klines5m)-21].Close
 		if price1hAgo > 0 {
 			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
 		}
@@ -116,7 +116,7 @@ func Get(symbol string) (*Data, error) {
 	fundingRate, _ := getFundingRate(symbol)
 
 	// 计算日内系列数据
-	intradayData := calculateIntradaySeries(klines3m)
+	intradayData := calculateIntradaySeries(klines5m)
 
 	// 计算长期数据
 	longerTermData := calculateLongerTermData(klines4h)
@@ -128,7 +128,7 @@ func Get(symbol string) (*Data, error) {
 		PriceChange4h:     priceChange4h,
 		CurrentEMA20:      currentEMA20,
 		CurrentMACD:       currentMACD,
-		CurrentRSI7:       currentRSI7,
+		CurrentRSI6:       currentRSI6,
 		OpenInterest:      oiData,
 		FundingRate:       fundingRate,
 		IntradaySeries:    intradayData,
@@ -301,7 +301,7 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 		MidPrices:   make([]float64, 0, 10),
 		EMA20Values: make([]float64, 0, 10),
 		MACDValues:  make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
+		RSI6Values:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
 	}
 
@@ -328,8 +328,8 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 
 		// 计算每个点的RSI
 		if i >= 7 {
-			rsi7 := calculateRSI(klines[:i+1], 7)
-			data.RSI7Values = append(data.RSI7Values, rsi7)
+			rsi6 := calculateRSI(klines[:i+1], 6)
+			data.RSI6Values = append(data.RSI6Values, rsi6)
 		}
 		if i >= 14 {
 			rsi14 := calculateRSI(klines[:i+1], 14)
@@ -457,7 +457,7 @@ func Format(data *Data) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (7 period) = %.3f\n\n",
-		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI7))
+		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI6))
 
 	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
 		data.Symbol))
@@ -484,8 +484,8 @@ func Format(data *Data) string {
 			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.IntradaySeries.MACDValues)))
 		}
 
-		if len(data.IntradaySeries.RSI7Values) > 0 {
-			sb.WriteString(fmt.Sprintf("RSI indicators (7‑Period): %s\n\n", formatFloatSlice(data.IntradaySeries.RSI7Values)))
+		if len(data.IntradaySeries.RSI6Values) > 0 {
+			sb.WriteString(fmt.Sprintf("RSI indicators (6‑Period): %s\n\n", formatFloatSlice(data.IntradaySeries.RSI6Values)))
 		}
 
 		if len(data.IntradaySeries.RSI14Values) > 0 {

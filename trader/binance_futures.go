@@ -165,9 +165,9 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 	}
 
 	// 设置逐仓模式
-	if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
-		return nil, err
-	}
+	//if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
+	//	return nil, err
+	//}
 
 	// 格式化数量到正确精度
 	quantityStr, err := t.FormatQuantity(symbol, quantity)
@@ -211,9 +211,9 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 	}
 
 	// 设置逐仓模式
-	if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
-		return nil, err
-	}
+	//if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
+	//	return nil, err
+	//}
 
 	// 格式化数量到正确精度
 	quantityStr, err := t.FormatQuantity(symbol, quantity)
