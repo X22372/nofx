@@ -69,7 +69,7 @@ func Get(symbol string) (*Data, error) {
 	symbol = Normalize(symbol)
 
 	// 获取5分钟K线数据 (最近10个)
-	klines5m, err := getKlines(symbol, "5m", 40) // 多获取一些用于计算
+	klines5m, err := getKlines(symbol, "5m", 60) // 多获取一些用于计算
 	if err != nil {
 		return nil, fmt.Errorf("获取5分钟K线失败: %v", err)
 	}
@@ -298,15 +298,15 @@ func calculateATR(klines []Kline, period int) float64 {
 // calculateIntradaySeries 计算日内系列数据
 func calculateIntradaySeries(klines []Kline) *IntradayData {
 	data := &IntradayData{
-		MidPrices:   make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		RSI6Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
+		MidPrices:   make([]float64, 0, 20),
+		EMA20Values: make([]float64, 0, 20),
+		MACDValues:  make([]float64, 0, 20),
+		RSI6Values:  make([]float64, 0, 20),
+		RSI14Values: make([]float64, 0, 20),
 	}
 
 	// 获取最近10个数据点
-	start := len(klines) - 10
+	start := len(klines) - 20
 	if start < 0 {
 		start = 0
 	}

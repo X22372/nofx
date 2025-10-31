@@ -210,9 +210,9 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 	}
 
 	// 设置杠杆
-	if err := t.SetLeverage(symbol, leverage); err != nil {
-		return nil, err
-	}
+	//if err := t.SetLeverage(symbol, leverage); err != nil {
+	//	return nil, err
+	//}
 
 	// 设置逐仓模式
 	//if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
