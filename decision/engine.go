@@ -225,7 +225,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
 		accountEquity*0.8, accountEquity*1.2, altcoinLeverage, accountEquity*3, accountEquity*6, btcEthLeverage))
 	sb.WriteString("4. **保证金**: 总使用率 ≤ 50%\n")
-	sb.WriteString("5. **RSI6**: 高于80才是超买，低于20才是超卖\n\n")
+	sb.WriteString("5. **RSI（周期为6）**: 高于80才是超买，低于20才是超卖\n\n")
 
 	// === 做空激励 ===
 	sb.WriteString("# 📉 做多做空平衡\n\n")
