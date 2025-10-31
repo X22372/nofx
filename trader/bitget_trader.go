@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/duke-git/lancet/v2/mathutil"
 	"github.com/spf13/cast"
 )
 
@@ -191,6 +192,16 @@ func (t *BitgetTrader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
+type OrderResp struct {
+	Code string `json:"code"`
+	Data struct {
+		OrderID   string `json:"orderId"`
+		ClientOid string `json:"clientOid"`
+	} `json:"data"`
+	Msg         string `json:"msg"`
+	RequestTime int64  `json:"requestTime"`
+}
+
 func (t *BitgetTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
 	// 先取消该币种的所有委托单（清理旧的止损止盈单）
 	if err := t.CancelAllOrders(symbol); err != nil {
@@ -230,57 +241,6 @@ func (t *BitgetTrader) OpenLong(symbol string, quantity float64, leverage int) (
 	return result, nil
 }
 
-func (t *BitgetTrader) OpenLongWithStopAndProfile(symbol string, quantity float64, stopLess, takeProfile string) (map[string]interface{}, error) {
-	// 先取消该币种的所有委托单（清理旧的止损止盈单）
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消旧委托单失败（可能没有委托单）: %v", err)
-	}
-
-	// 格式化数量到正确精度
-	quantityStr, err := t.FormatQuantity(symbol, quantity)
-	if err != nil {
-		return nil, err
-	}
-
-	params := make(map[string]string)
-	params["symbol"] = symbol + "_UMCBL"
-	params["marginCoin"] = "USDT"
-	params["side"] = "open_long"
-	params["orderType"] = "market"
-	params["size"] = quantityStr
-	params["timInForceValue"] = "normal"
-	params["presetStopLossPrice"] = stopLess
-	params["presetTakeProfitPrice"] = takeProfile
-
-	resp, err := t.client.Post("/api/mix/v1/order/placeOrder", params)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	order := OrderResp{}
-	err = json.Unmarshal([]byte(resp), &order)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	result := map[string]interface{}{
-		"symbol":  symbol,
-		"orderId": order.Data.OrderID,
-		"status":  order.Code,
-	}
-	return result, nil
-}
-
-type OrderResp struct {
-	Code string `json:"code"`
-	Data struct {
-		OrderID   string `json:"orderId"`
-		ClientOid string `json:"clientOid"`
-	} `json:"data"`
-	Msg         string `json:"msg"`
-	RequestTime int64  `json:"requestTime"`
-}
-
 func (t *BitgetTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
 	// 先取消该币种的所有委托单（清理旧的止损止盈单）
 	if err := t.CancelAllOrders(symbol); err != nil {
@@ -306,43 +266,6 @@ func (t *BitgetTrader) OpenShort(symbol string, quantity float64, leverage int) 
 		log.Println(err)
 		return nil, err
 	}
-	order := OrderResp{}
-	err = json.Unmarshal([]byte(resp), &order)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	result := map[string]interface{}{
-		"symbol":  symbol,
-		"orderId": order.Data.OrderID,
-		"status":  order.Code,
-	}
-	return result, nil
-}
-
-func (t *BitgetTrader) OpenShortWithStopAndProfile(symbol string, quantity float64, stopLess, takeProfile string) (map[string]interface{}, error) {
-	// 先取消该币种的所有委托单（清理旧的止损止盈单）
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消旧委托单失败（可能没有委托单）: %v", err)
-	}
-
-	// 格式化数量到正确精度
-	quantityStr, err := t.FormatQuantity(symbol, quantity)
-	if err != nil {
-		return nil, err
-	}
-
-	params := make(map[string]string)
-	params["symbol"] = symbol + "_UMCBL"
-	params["marginCoin"] = "USDT"
-	params["side"] = "open_short"
-	params["orderType"] = "market"
-	params["size"] = quantityStr
-	params["timInForceValue"] = "normal"
-	params["presetStopLossPrice"] = stopLess
-	params["presetTakeProfitPrice"] = takeProfile
-
-	resp, err := t.client.Post("/api/mix/v1/order/placeOrder", params)
 	order := OrderResp{}
 	err = json.Unmarshal([]byte(resp), &order)
 	if err != nil {
@@ -589,7 +512,7 @@ func (t *BitgetTrader) GetSymbolPrecision(symbol string) (int, error) {
 
 	resp, err := t.client.Get("/api/mix/v1/market/contracts", params)
 	if err != nil {
-		log.Println("获取账户信息失败:", err)
+		log.Println("获取交易对信息失败:", err)
 		return 3, err
 	}
 	data := BitgetContracts{}
@@ -610,12 +533,7 @@ func (t *BitgetTrader) GetSymbolPrecision(symbol string) (int, error) {
 }
 
 func (t *BitgetTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
-	precision, err := t.GetSymbolPrecision(symbol)
-	if err != nil {
-		// 如果获取失败，使用默认格式
-		return fmt.Sprintf("%.3f", quantity), nil
-	}
-
-	format := fmt.Sprintf("%%.%df", precision)
-	return fmt.Sprintf(format, quantity), nil
+	precision, _ := t.GetSymbolPrecision(symbol)
+	quantity = mathutil.RoundToFloat(quantity, precision)
+	return cast.ToString(quantity), nil
 }

@@ -260,6 +260,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- 综合信心度 ≥ 75 才开仓\n\n")
 	sb.WriteString("**避免低质量信号**：\n")
 	sb.WriteString("- 单一维度（只看一个指标）\n")
+	sb.WriteString("- 短周期 RSI（周期为6）超买超卖\n")
 	sb.WriteString("- 相互矛盾（涨但量萎缩）\n")
 	sb.WriteString("- 横盘震荡\n")
 	sb.WriteString("- 刚平仓不久（<15分钟）\n\n")
