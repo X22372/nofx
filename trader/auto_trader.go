@@ -75,7 +75,8 @@ type AutoTrader struct {
 	aiModel               string // AI模型名称
 	exchange              string // 交易平台名称
 	config                AutoTraderConfig
-	trader                Trader                 // 使用Trader接口（支持多平台）
+	trader                Trader // 使用Trader接口（支持多平台）
+	mcpClient             *mcp.Client
 	decisionLogger        *logger.DecisionLogger // 决策日志记录器
 	initialBalance        float64
 	dailyPnL              float64
@@ -105,18 +106,18 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	}
 
 	// 初始化AI
-	mcp := mcp.New()
+	mcpClient := mcp.New()
 	if config.AIModel == "custom" {
 		// 使用自定义API
-		mcp.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
+		mcpClient.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
 		log.Printf("🤖 [%s] 使用自定义AI API: %s (模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
 	} else if config.UseQwen || config.AIModel == "qwen" {
 		// 使用Qwen
-		mcp.SetQwenAPIKey(config.QwenKey, "")
+		mcpClient.SetQwenAPIKey(config.QwenKey, "")
 		log.Printf("🤖 [%s] 使用阿里云Qwen AI", config.Name)
 	} else {
 		// 默认使用DeepSeek
-		mcp.SetDeepSeekAPIKey(config.DeepSeekKey)
+		mcpClient.SetDeepSeekAPIKey(config.DeepSeekKey)
 		log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
 	}
 
@@ -173,6 +174,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		exchange:              config.Exchange,
 		config:                config,
 		trader:                trader,
+		mcpClient:             mcpClient,
 		decisionLogger:        decisionLogger,
 		initialBalance:        config.InitialBalance,
 		lastResetTime:         time.Now(),
@@ -290,9 +292,8 @@ func (at *AutoTrader) runCycle() error {
 
 	// 4. 调用AI获取完整决策
 	log.Println("🤖 正在请求AI分析并决策...")
-	mcp := mcp.New()
-	mcp.SetDeepSeekAPIKey(at.config.DeepSeekKey)
-	decision, err := decision.GetFullDecision(ctx, mcp)
+
+	decision, err := decision.GetFullDecision(ctx, at.mcpClient)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
 	if decision != nil {
