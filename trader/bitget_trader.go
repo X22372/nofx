@@ -458,7 +458,7 @@ func (t *BitgetTrader) SetStopLoss(symbol string, positionSide string, quantity,
 	params := make(map[string]string)
 	params["symbol"] = symbol + "_UMCBL"
 	params["marginCoin"] = "USDT"
-	params["holdSide"] = positionSide
+	params["holdSide"] = strings.ToLower(positionSide)
 	params["planType"] = "pos_loss"
 	params["triggerPrice"] = cast.ToString(stopPrice)
 	params["triggerType"] = "market_price"
@@ -484,7 +484,7 @@ func (t *BitgetTrader) SetTakeProfit(symbol string, positionSide string, quantit
 	params := make(map[string]string)
 	params["symbol"] = symbol + "_UMCBL"
 	params["marginCoin"] = "USDT"
-	params["holdSide"] = positionSide
+	params["holdSide"] = strings.ToLower(positionSide)
 	params["planType"] = "pos_profit"
 	params["triggerPrice"] = cast.ToString(takeProfitPrice)
 	params["triggerType"] = "market_price"
