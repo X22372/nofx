@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/duke-git/lancet/v2/convertor"
 	"github.com/duke-git/lancet/v2/mathutil"
 	"github.com/spf13/cast"
 )
@@ -475,6 +476,7 @@ func (t *BitgetTrader) SetStopLoss(symbol string, positionSide string, quantity,
 		return err
 	}
 	if order.Code != "00000" {
+		log.Println(convertor.ToString(params))
 		log.Println("  ❌ 创建止损失败:", order.Msg)
 	}
 	return nil
@@ -501,6 +503,7 @@ func (t *BitgetTrader) SetTakeProfit(symbol string, positionSide string, quantit
 		return err
 	}
 	if order.Code != "00000" {
+		log.Println(convertor.ToString(params))
 		log.Println("  ❌ 创建止盈失败:", order.Msg)
 	}
 	return nil
