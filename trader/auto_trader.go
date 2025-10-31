@@ -330,12 +330,14 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf(strings.Repeat("-", 70) + "\n")
 
 	// 6. 打印AI决策
+	saveLog := false
 	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
 	for i, d := range decision.Decisions {
 		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
 		if d.Action == "open_long" || d.Action == "open_short" {
 			log.Printf("      杠杆: %dx | 仓位: %.2f USDT | 止损: %.4f | 止盈: %.4f",
 				d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
+			saveLog = true
 		}
 	}
 	log.Println()
@@ -376,8 +378,10 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 8. 保存决策记录
-	if err := at.decisionLogger.LogDecision(record); err != nil {
-		log.Printf("⚠ 保存决策记录失败: %v", err)
+	if saveLog {
+		if err := at.decisionLogger.LogDecision(record); err != nil {
+			log.Printf("⚠ 保存决策记录失败: %v", err)
+		}
 	}
 
 	return nil
