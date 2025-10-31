@@ -218,7 +218,7 @@ func (t *BitgetTrader) OpenLong(symbol string, quantity float64, leverage int) (
 	params["symbol"] = symbol + "_UMCBL"
 	params["marginCoin"] = "USDT"
 	params["side"] = "open_long"
-	params["planType"] = "market"
+	params["orderType"] = "market"
 	params["size"] = quantityStr
 	params["timInForceValue"] = "normal"
 
@@ -232,6 +232,9 @@ func (t *BitgetTrader) OpenLong(symbol string, quantity float64, leverage int) (
 	if err != nil {
 		log.Println(err)
 		return nil, err
+	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建订单失败:", order.Msg)
 	}
 	result := map[string]interface{}{
 		"symbol":  symbol,
@@ -271,6 +274,9 @@ func (t *BitgetTrader) OpenShort(symbol string, quantity float64, leverage int) 
 	if err != nil {
 		log.Println(err)
 		return nil, err
+	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建订单失败:", order.Msg)
 	}
 	result := map[string]interface{}{
 		"symbol":  symbol,
@@ -325,6 +331,9 @@ func (t *BitgetTrader) CloseLong(symbol string, quantity float64) (map[string]in
 		log.Println(err)
 		return nil, err
 	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建订单失败:", order.Msg)
+	}
 	result := map[string]interface{}{
 		"symbol":  symbol,
 		"orderId": order.Data.OrderID,
@@ -377,6 +386,9 @@ func (t *BitgetTrader) CloseShort(symbol string, quantity float64) (map[string]i
 	if err != nil {
 		log.Println(err)
 		return nil, err
+	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建订单失败:", order.Msg)
 	}
 	result := map[string]interface{}{
 		"symbol":  symbol,
@@ -451,10 +463,19 @@ func (t *BitgetTrader) SetStopLoss(symbol string, positionSide string, quantity,
 	params["triggerPrice"] = cast.ToString(stopPrice)
 	params["triggerType"] = "market_price"
 
-	_, err := t.client.Post("/api/mix/v1/plan/placePositionsTPSL", params)
+	resp, err := t.client.Post("/api/mix/v1/plan/placePositionsTPSL", params)
 	if err != nil {
 		log.Println(err)
 		return err
+	}
+	order := OrderResp{}
+	err = json.Unmarshal([]byte(resp), &order)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建止损失败:", order.Msg)
 	}
 	return nil
 }
@@ -468,10 +489,19 @@ func (t *BitgetTrader) SetTakeProfit(symbol string, positionSide string, quantit
 	params["triggerPrice"] = cast.ToString(takeProfitPrice)
 	params["triggerType"] = "market_price"
 
-	_, err := t.client.Post("/api/mix/v1/plan/placePositionsTPSL", params)
+	resp, err := t.client.Post("/api/mix/v1/plan/placePositionsTPSL", params)
 	if err != nil {
 		log.Println(err)
 		return err
+	}
+	order := OrderResp{}
+	err = json.Unmarshal([]byte(resp), &order)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	if order.Code != "00000" {
+		log.Println("  ❌ 创建止盈失败:", order.Msg)
 	}
 	return nil
 }
