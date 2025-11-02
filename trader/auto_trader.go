@@ -379,6 +379,7 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 8. 保存决策记录
+	record.InputPrompt = ""
 	if err := at.decisionLogger.LogDecision(record); err != nil {
 		log.Printf("⚠ 保存决策记录失败: %v", err)
 	}
