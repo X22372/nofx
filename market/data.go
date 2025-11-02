@@ -8,6 +8,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/duke-git/lancet/v2/convertor"
+	"github.com/duke-git/lancet/v2/slice"
 )
 
 // Data 市场数据结构
@@ -26,13 +30,37 @@ type Data struct {
 	MiddleTermContext *LongerTermData
 }
 
+type DataV2 struct {
+	Symbol            string
+	CurrentPrice      float64
+	PriceChange1h     float64 // 1小时价格变化百分比
+	PriceChange4h     float64 // 4小时价格变化百分比
+	CurrentEMA12      float64
+	CurrentMACD       float64
+	CurrentRSI6       float64
+	IntradaySeries    *IntradayData
+	LongerTermContext *LongerTermData
+	MiddleTermContext *LongerTermData
+}
+
+type KlinePlus struct {
+	Kline
+	RSI6Values     []float64
+	EMA12Values    []float64
+	SMA200Values   []float64
+	MACDValues     []float64
+	BollUpValues   []float64
+	BollDownValues []float64
+	BollMidValues  []float64
+}
+
 // OIData Open Interest数据
 type OIData struct {
 	Latest  float64
 	Average float64
 }
 
-// IntradayData 日内数据(5分钟间隔)
+// IntradayData 日内数据(15分钟间隔)
 type IntradayData struct {
 	MidPrices   []float64
 	EMA20Values []float64
@@ -69,37 +97,39 @@ func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
 
-	// 获取5分钟K线数据 (最近10个)
-	klines5m, err := getKlines(symbol, "5m", 60) // 多获取一些用于计算
-	if err != nil {
-		return nil, fmt.Errorf("获取5分钟K线失败: %v", err)
-	}
+	// 获取15分钟K线数据 (最近10个)
+	//klines15m, err := getKlines(symbol, "15m", 60) // 多获取一些用于计算
+	//if err != nil {
+	//	return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
+	//}
 
 	// 获取1小时K线数据 (最近10个)
 	klines1h, err := getKlines(symbol, "1h", 60) // 多获取一些用于计算
+	fmt.Println(convertor.ToString(identifyValidFVG(klines1h)))
 	if err != nil {
 		return nil, fmt.Errorf("获取1小时K线失败: %v", err)
 	}
 
 	// 获取4小时K线数据 (最近10个)
 	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
+	fmt.Println(convertor.ToString(identifyValidFVG(klines4h)))
 	if err != nil {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
 	}
 
-	// 计算当前指标 (基于5分钟最新数据)
-	currentPrice := klines5m[len(klines5m)-1].Close
-	currentEMA20 := calculateEMA(klines5m, 20)
-	currentMACD := calculateMACD(klines5m)
-	currentRSI6 := calculateRSI(klines5m, 6)
+	// 计算当前指标 (基于1小时最新数据)
+	currentPrice := klines1h[len(klines1h)-1].Close
+	currentEMA20 := calculateEMA(klines1h, 20)
+	currentMACD := calculateMACD(klines1h)
+	currentRSI6 := calculateRSI(klines1h, 6)
 
 	// 计算价格变化百分比
-	// 1小时价格变化 = 12个5分钟K线前的价格
+	// 1小时价格变化 = 1个1小时K线前的价格
 	priceChange1h := 0.0
-	if len(klines5m) >= 13 { // 至少需要21根K线 (当前 + 20根前)
-		price1hAgo := klines5m[len(klines5m)-21].Close
-		if price1hAgo > 0 {
-			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
+	if len(klines1h) >= 2 {
+		price4hAgo := klines1h[len(klines1h)-2].Close
+		if price4hAgo > 0 {
+			priceChange1h = ((currentPrice - price4hAgo) / price4hAgo) * 100
 		}
 	}
 
@@ -123,23 +153,23 @@ func Get(symbol string) (*Data, error) {
 	fundingRate, _ := getFundingRate(symbol)
 
 	// 计算日内系列数据
-	intradayData := calculateIntradaySeries(klines5m)
+	//intradayData := calculateIntradaySeries(klines15m)
 
 	// 计算长期数据
 	middleTermData := calculateLongerTermData(klines1h)
 	longerTermData := calculateLongerTermData(klines4h)
 
 	return &Data{
-		Symbol:            symbol,
-		CurrentPrice:      currentPrice,
-		PriceChange1h:     priceChange1h,
-		PriceChange4h:     priceChange4h,
-		CurrentEMA20:      currentEMA20,
-		CurrentMACD:       currentMACD,
-		CurrentRSI6:       currentRSI6,
-		OpenInterest:      oiData,
-		FundingRate:       fundingRate,
-		IntradaySeries:    intradayData,
+		Symbol:        symbol,
+		CurrentPrice:  currentPrice,
+		PriceChange1h: priceChange1h,
+		PriceChange4h: priceChange4h,
+		CurrentEMA20:  currentEMA20,
+		CurrentMACD:   currentMACD,
+		CurrentRSI6:   currentRSI6,
+		OpenInterest:  oiData,
+		FundingRate:   fundingRate,
+		//IntradaySeries:    intradayData,
 		LongerTermContext: longerTermData,
 		MiddleTermContext: middleTermData,
 	}, nil
@@ -465,7 +495,7 @@ func getFundingRate(symbol string) (float64, error) {
 func Format(data *Data) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (6 period) = %.3f\n\n",
+	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (6 period) = %.3f\n\n",
 		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI6))
 
 	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
@@ -479,7 +509,7 @@ func Format(data *Data) string {
 	sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
 
 	if data.IntradaySeries != nil {
-		sb.WriteString("Intraday series (5‑minute intervals, oldest → latest):\n\n")
+		sb.WriteString("Intraday series (15‑minute intervals, oldest → latest):\n\n")
 
 		if len(data.IntradaySeries.MidPrices) > 0 {
 			sb.WriteString(fmt.Sprintf("Mid prices: %s\n\n", formatFloatSlice(data.IntradaySeries.MidPrices)))
@@ -579,4 +609,75 @@ func parseFloat(v interface{}) (float64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported type: %T", v)
 	}
+}
+
+// 定义 FVG 结构
+type FVG struct {
+	High    float64   // FVG （最高点）
+	Low     float64   // FVG （最低点）
+	Time    time.Time // FVG 中间K线开盘时间
+	IsValid bool      // 标记 FVG 是否有效
+	Type    string    // FVG 类型："1上涨" 或 "2下跌"
+}
+
+// 将时间戳转换为可读时间
+func timestampToTime(ts int64) time.Time {
+	return time.UnixMilli(ts)
+}
+
+func identifyValidFVG(kLines []Kline) []FVG {
+	var fvgList []FVG
+
+	// 遍历所有 K 线，按规则识别 FVG
+	for i := 2; i < len(kLines); i++ {
+		k1 := kLines[i-2] // 第1根 K 线
+		k2 := kLines[i-1] // 第2根 K 线
+		k3 := kLines[i]   // 第3根 K 线
+
+		// 判断是否形成上涨 FVG（价格向上突破）
+		if k1.High < k3.Low && k2.Close > k1.High && k2.Close > k3.Low && k3.Close > k1.Close {
+			// 创建上涨 FVG
+			fvg := FVG{
+				High:    k3.Low,
+				Low:     k1.High,
+				Time:    timestampToTime(k2.OpenTime),
+				IsValid: true,
+				Type:    "上涨",
+			}
+			fvgList = append(fvgList, fvg)
+		}
+
+		// 判断是否形成下跌 FVG（价格向下突破）
+		if k1.Low < k3.High && k2.Close < k1.Low && k2.Close < k3.High && k3.Close < k1.Close {
+			// 创建下跌 FVG
+			fvg := FVG{
+				High:    k1.Low,
+				Low:     k3.High,
+				Time:    timestampToTime(k2.OpenTime),
+				IsValid: true,
+				Type:    "下跌",
+			}
+			fvgList = append(fvgList, fvg)
+		}
+
+		// 检查是否有 FVG 被后续 K 线实体穿过
+		for j := range fvgList {
+			// 如果 FVG 已经无效，则跳过
+			if !fvgList[j].IsValid {
+				continue
+			}
+			if fvgList[j].Type == "上涨" && k3.Close < fvgList[j].Low { //实体跌到下边界外
+				fvgList[j].IsValid = false // 标记为无效
+			}
+
+			if fvgList[j].Type == "下跌" && k3.Close > fvgList[j].High { //实体冲到上边界外
+				fvgList[j].IsValid = false // 标记为无效
+			}
+		}
+	}
+	fvgList = slice.Filter(fvgList, func(index int, item FVG) bool {
+		return item.IsValid
+	})
+
+	return fvgList
 }
