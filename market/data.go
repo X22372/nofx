@@ -79,6 +79,8 @@ type LongerTermData struct {
 	AverageVolume float64
 	MACDValues    []float64
 	RSI14Values   []float64
+	FVGValues     []FVG
+	KlineValues   []Kline
 }
 
 // Kline K线数据
@@ -105,14 +107,12 @@ func Get(symbol string) (*Data, error) {
 
 	// 获取1小时K线数据 (最近10个)
 	klines1h, err := getKlines(symbol, "1h", 60) // 多获取一些用于计算
-	fmt.Println(convertor.ToString(identifyValidFVG(klines1h)))
 	if err != nil {
 		return nil, fmt.Errorf("获取1小时K线失败: %v", err)
 	}
 
 	// 获取4小时K线数据 (最近10个)
 	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
-	fmt.Println(convertor.ToString(identifyValidFVG(klines4h)))
 	if err != nil {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
 	}
@@ -157,7 +157,9 @@ func Get(symbol string) (*Data, error) {
 
 	// 计算长期数据
 	middleTermData := calculateLongerTermData(klines1h)
+	middleTermData.FVGValues = identifyValidFVG(klines1h[:len(klines1h)-1])
 	longerTermData := calculateLongerTermData(klines4h)
+	longerTermData.FVGValues = identifyValidFVG(klines4h[:len(klines4h)-1])
 
 	return &Data{
 		Symbol:        symbol,
@@ -384,6 +386,7 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	data := &LongerTermData{
 		MACDValues:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
+		KlineValues: klines[len(klines)-30:],
 	}
 
 	// 计算EMA
@@ -536,20 +539,27 @@ func Format(data *Data) string {
 		sb.WriteString("Longer‑term context (1‑hour timeframe):\n\n")
 
 		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
-			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
+			data.MiddleTermContext.EMA20, data.LongerTermContext.EMA50))
 
 		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
-			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
+			data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
 
 		sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-			data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+			data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
 
-		if len(data.LongerTermContext.MACDValues) > 0 {
+		if len(data.MiddleTermContext.MACDValues) > 0 {
 			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		}
 
-		if len(data.LongerTermContext.RSI14Values) > 0 {
+		if len(data.MiddleTermContext.RSI14Values) > 0 {
 			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		}
+
+		if len(data.MiddleTermContext.FVGValues) > 0 {
+			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.MiddleTermContext.FVGValues)))
+		}
+		if len(data.MiddleTermContext.KlineValues) > 0 {
+			sb.WriteString(fmt.Sprintf("KLine json data: %s\n\n", convertor.ToString(data.MiddleTermContext.KlineValues)))
 		}
 	}
 
@@ -571,6 +581,12 @@ func Format(data *Data) string {
 
 		if len(data.LongerTermContext.RSI14Values) > 0 {
 			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		}
+		if len(data.LongerTermContext.FVGValues) > 0 {
+			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.LongerTermContext.FVGValues)))
+		}
+		if len(data.LongerTermContext.KlineValues) > 0 {
+			sb.WriteString(fmt.Sprintf("KLine json data: %s\n\n", convertor.ToString(data.LongerTermContext.KlineValues)))
 		}
 	}
 

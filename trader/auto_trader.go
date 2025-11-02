@@ -11,6 +11,9 @@ import (
 	"nofx/pool"
 	"strings"
 	"time"
+
+	"github.com/duke-git/lancet/v2/mathutil"
+	"github.com/spf13/cast"
 )
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
@@ -330,14 +333,12 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf(strings.Repeat("-", 70) + "\n")
 
 	// 6. 打印AI决策
-	saveLog := false
 	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
 	for i, d := range decision.Decisions {
 		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
 		if d.Action == "open_long" || d.Action == "open_short" {
 			log.Printf("      杠杆: %dx | 仓位: %.2f USDT | 止损: %.4f | 止盈: %.4f",
 				d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
-			saveLog = true
 		}
 	}
 	log.Println()
@@ -378,10 +379,8 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 8. 保存决策记录
-	if saveLog {
-		if err := at.decisionLogger.LogDecision(record); err != nil {
-			log.Printf("⚠ 保存决策记录失败: %v", err)
-		}
+	if err := at.decisionLogger.LogDecision(record); err != nil {
+		log.Printf("⚠ 保存决策记录失败: %v", err)
 	}
 
 	return nil
@@ -563,6 +562,9 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 		return at.executeCloseLongWithRecord(decision, actionRecord)
 	case "close_short":
 		return at.executeCloseShortWithRecord(decision, actionRecord)
+	case "move_stop":
+		return at.executeMoveStopWithRecord(decision, actionRecord)
+
 	case "hold", "wait":
 		// 无需执行，仅记录
 		return nil
@@ -726,6 +728,32 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	}
 
 	log.Printf("  ✓ 平仓成功")
+	return nil
+}
+
+// executeMoveStopWithRecord 执行移动止损并记录详细信息
+func (at *AutoTrader) executeMoveStopWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🔄 移动止损: %s", decision.Symbol)
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 修改止损
+	positionMapList, _ := at.trader.GetPositions()
+	for _, m := range positionMapList {
+		if cast.ToString(m["symbol"]) == decision.Symbol {
+			err = at.trader.SetStopLoss(decision.Symbol, cast.ToString(m["side"]), 0, mathutil.RoundToFloat(decision.StopLoss, 2))
+			if err != nil {
+				return err
+			}
+			log.Printf("  ✓ 设置止损成功")
+
+		}
+	}
 	return nil
 }
 
