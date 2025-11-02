@@ -564,7 +564,10 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 		return at.executeCloseShortWithRecord(decision, actionRecord)
 	case "move_stop":
 		return at.executeMoveStopWithRecord(decision, actionRecord)
-
+	case "move_profit":
+		return at.executeMoveProfitWithRecord(decision, actionRecord)
+	case "take_profit":
+		return at.executeTakeProfitWithRecord(decision, actionRecord)
 	case "hold", "wait":
 		// 无需执行，仅记录
 		return nil
@@ -751,6 +754,63 @@ func (at *AutoTrader) executeMoveStopWithRecord(decision *decision.Decision, act
 				return err
 			}
 			log.Printf("  ✓ 设置止损成功")
+
+		}
+	}
+	return nil
+}
+
+// executeMoveProfitWithRecord 执行移动止盈并记录详细信息
+func (at *AutoTrader) executeMoveProfitWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🔄 移动止盈: %s", decision.Symbol)
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 修改止盈
+	positionMapList, _ := at.trader.GetPositions()
+	for _, m := range positionMapList {
+		if cast.ToString(m["symbol"]) == decision.Symbol {
+			err = at.trader.SetTakeProfit(decision.Symbol, cast.ToString(m["side"]), 0, mathutil.RoundToFloat(decision.TakeProfit, 2))
+			if err != nil {
+				return err
+			}
+			log.Printf("  ✓ 设置止盈成功")
+
+		}
+	}
+	return nil
+}
+
+// executeTakeProfitWithRecord 执行部分止盈并记录详细信息
+func (at *AutoTrader) executeTakeProfitWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🔄 部分止盈: %s", decision.Symbol)
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 修改止盈
+	positionMapList, _ := at.trader.GetPositions()
+	for _, m := range positionMapList {
+		if cast.ToString(m["symbol"]) == decision.Symbol {
+			side := cast.ToString(m["side"])
+			if strings.ToLower(side) == "long" {
+				_, err = at.trader.CloseLong(decision.Symbol, cast.ToFloat64(m["positionAmt"])/2)
+			} else {
+				_, err = at.trader.CloseShort(decision.Symbol, cast.ToFloat64(m["positionAmt"])/2)
+			}
+			if err != nil {
+				return err
+			}
+			log.Printf("  ✓ 止盈一半成功")
 
 		}
 	}

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/duke-git/lancet/v2/convertor"
+	"github.com/duke-git/lancet/v2/mathutil"
 	"github.com/duke-git/lancet/v2/slice"
+	"github.com/spf13/cast"
 )
 
 // Data 市场数据结构
@@ -24,6 +26,7 @@ type Data struct {
 	CurrentMACD       float64
 	CurrentRSI6       float64
 	OpenInterest      *OIData
+	OISli             []float64
 	FundingRate       float64
 	IntradaySeries    *IntradayData
 	LongerTermContext *LongerTermData
@@ -45,13 +48,17 @@ type DataV2 struct {
 
 type KlinePlus struct {
 	Kline
-	RSI6Values     []float64
-	EMA12Values    []float64
-	SMA200Values   []float64
-	MACDValues     []float64
-	BollUpValues   []float64
-	BollDownValues []float64
-	BollMidValues  []float64
+	OpenTime    time.Time
+	RSI6Value   float64
+	SMA200Value float64
+	MACDValue   float64
+	BollValue   BollBand
+}
+
+type BollBand struct {
+	BollUpValue   float64
+	BollDownValue float64
+	BollMidValue  float64
 }
 
 // OIData Open Interest数据
@@ -80,7 +87,7 @@ type LongerTermData struct {
 	MACDValues    []float64
 	RSI14Values   []float64
 	FVGValues     []FVG
-	KlineValues   []Kline
+	KlineValues   []KlinePlus
 }
 
 // Kline K线数据
@@ -106,13 +113,13 @@ func Get(symbol string) (*Data, error) {
 	//}
 
 	// 获取1小时K线数据 (最近10个)
-	klines1h, err := getKlines(symbol, "1h", 60) // 多获取一些用于计算
+	klines1h, err := getKlines(symbol, "1h", 300) // 多获取一些用于计算
 	if err != nil {
 		return nil, fmt.Errorf("获取1小时K线失败: %v", err)
 	}
 
 	// 获取4小时K线数据 (最近10个)
-	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
+	klines4h, err := getKlines(symbol, "4h", 300) // 多获取用于计算指标
 	if err != nil {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
 	}
@@ -143,14 +150,14 @@ func Get(symbol string) (*Data, error) {
 	}
 
 	// 获取OI数据
-	oiData, err := getOpenInterestData(symbol)
+	oiData, err := getOpenInterestHistData(symbol)
 	if err != nil {
 		// OI失败不影响整体,使用默认值
-		oiData = &OIData{Latest: 0, Average: 0}
+		oiData = nil
 	}
 
-	// 获取Funding Rate
-	fundingRate, _ := getFundingRate(symbol)
+	//// 获取Funding Rate
+	//fundingRate, _ := getFundingRate(symbol)
 
 	// 计算日内系列数据
 	//intradayData := calculateIntradaySeries(klines15m)
@@ -169,9 +176,10 @@ func Get(symbol string) (*Data, error) {
 		CurrentEMA20:  currentEMA20,
 		CurrentMACD:   currentMACD,
 		CurrentRSI6:   currentRSI6,
-		OpenInterest:  oiData,
-		FundingRate:   fundingRate,
+		//OpenInterest:  oiData,
+		//FundingRate:   fundingRate,
 		//IntradaySeries:    intradayData,
+		OISli:             oiData,
 		LongerTermContext: longerTermData,
 		MiddleTermContext: middleTermData,
 	}, nil
@@ -241,7 +249,7 @@ func calculateEMA(klines []Kline, period int) float64 {
 		ema = (klines[i].Close-ema)*multiplier + ema
 	}
 
-	return ema
+	return roundNumber(ema)
 }
 
 // calculateMACD 计算MACD
@@ -255,7 +263,7 @@ func calculateMACD(klines []Kline) float64 {
 	ema26 := calculateEMA(klines, 26)
 
 	// MACD = EMA12 - EMA26
-	return ema12 - ema26
+	return roundNumber(ema12 - ema26)
 }
 
 // calculateRSI 计算RSI
@@ -299,7 +307,7 @@ func calculateRSI(klines []Kline, period int) float64 {
 	rs := avgGain / avgLoss
 	rsi := 100 - (100 / (1 + rs))
 
-	return rsi
+	return roundNumber(rsi)
 }
 
 // calculateATR 计算ATR
@@ -333,7 +341,7 @@ func calculateATR(klines []Kline, period int) float64 {
 		atr = (atr*float64(period-1) + trs[i]) / float64(period)
 	}
 
-	return atr
+	return roundNumber(atr)
 }
 
 // calculateIntradaySeries 计算日内系列数据
@@ -386,46 +394,138 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	data := &LongerTermData{
 		MACDValues:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
-		KlineValues: klines[len(klines)-30:],
+		KlineValues: make([]KlinePlus, len(klines), len(klines)),
 	}
 
 	// 计算EMA
-	data.EMA20 = calculateEMA(klines, 20)
-	data.EMA50 = calculateEMA(klines, 50)
-
-	// 计算ATR
-	data.ATR3 = calculateATR(klines, 3)
-	data.ATR14 = calculateATR(klines, 14)
+	//data.EMA20 = calculateEMA(klines, 20)
+	//data.EMA50 = calculateEMA(klines, 50)
+	//
+	//// 计算ATR
+	//data.ATR3 = calculateATR(klines, 3)
+	//data.ATR14 = calculateATR(klines, 14)
 
 	// 计算成交量
-	if len(klines) > 0 {
-		data.CurrentVolume = klines[len(klines)-1].Volume
-		// 计算平均成交量
-		sum := 0.0
-		for _, k := range klines {
-			sum += k.Volume
-		}
-		data.AverageVolume = sum / float64(len(klines))
-	}
+	//if len(klines) > 0 {
+	//	data.CurrentVolume = klines[len(klines)-1].Volume
+	//	// 计算平均成交量
+	//	sum := 0.0
+	//	for _, k := range klines {
+	//		sum += k.Volume
+	//	}
+	//	data.AverageVolume = sum / float64(len(klines))
+	//}
 
 	// 计算MACD和RSI序列
-	start := len(klines) - 10
+	start := len(klines) - 100
 	if start < 0 {
 		start = 0
 	}
 
+	closeSli := make([]float64, 0, 10)
+	for _, kline := range klines {
+		closeSli = append(closeSli, kline.Close)
+	}
+	upSli, midSli, lowSli := calculateBollingerBands(closeSli, 21, 2)
+	smaSli := calculateSMA(closeSli, 200)
+	for i := range data.KlineValues {
+		data.KlineValues[i].Kline = klines[i]
+		data.KlineValues[i].OpenTime = timestampToTime(klines[i].OpenTime)
+		boll := BollBand{
+			BollUpValue:   upSli[i],
+			BollDownValue: midSli[i],
+			BollMidValue:  lowSli[i],
+		}
+		data.KlineValues[i].BollValue = boll
+		data.KlineValues[i].SMA200Value = smaSli[i]
+	}
 	for i := start; i < len(klines); i++ {
 		if i >= 25 {
 			macd := calculateMACD(klines[:i+1])
 			data.MACDValues = append(data.MACDValues, macd)
+			data.KlineValues[i].MACDValue = macd
+		}
+		if i >= 6 {
+			rsi6 := calculateRSI(klines[:i+1], 6)
+			data.KlineValues[i].RSI6Value = rsi6
 		}
 		if i >= 14 {
 			rsi14 := calculateRSI(klines[:i+1], 14)
 			data.RSI14Values = append(data.RSI14Values, rsi14)
 		}
 	}
+	data.KlineValues = data.KlineValues[len(data.KlineValues)-48:]
 
 	return data
+}
+
+func calculateBollingerBands(prices []float64, n int, k float64) (upperBand, middleBand, lowerBand []float64) {
+	if len(prices) < n {
+		return nil, nil, nil
+	}
+
+	var sma []float64
+	var stdDev []float64
+
+	for i := n - 1; i < len(prices); i++ {
+		sum := 0.0
+		for j := i - n + 1; j <= i; j++ {
+			sum += prices[j]
+		}
+		sma = append(sma, sum/float64(n))
+
+		var varianceSum float64
+		for j := i - n + 1; j <= i; j++ {
+			varianceSum += math.Pow(prices[j]-sma[len(sma)-1], 2)
+		}
+		stdDev = append(stdDev, math.Sqrt(varianceSum/float64(n)))
+
+		upperBand = append(upperBand, roundNumber(sma[len(sma)-1]+k*stdDev[len(stdDev)-1]))
+		middleBand = append(middleBand, roundNumber(sma[len(sma)-1]))
+		lowerBand = append(lowerBand, roundNumber(sma[len(sma)-1]-k*stdDev[len(stdDev)-1]))
+	}
+
+	if len(upperBand) < len(prices) {
+		temp := make([]float64, len(prices)-len(upperBand), len(prices)-len(upperBand))
+		temp = append(temp, upperBand...)
+		upperBand = temp
+	}
+
+	if len(middleBand) < len(prices) {
+		temp := make([]float64, len(prices)-len(middleBand), len(prices)-len(middleBand))
+		temp = append(temp, middleBand...)
+		middleBand = temp
+	}
+
+	if len(lowerBand) < len(prices) {
+		temp := make([]float64, len(prices)-len(lowerBand), len(prices)-len(lowerBand))
+		temp = append(temp, lowerBand...)
+		lowerBand = temp
+	}
+
+	return upperBand, middleBand, lowerBand
+}
+
+func calculateSMA(prices []float64, n int) []float64 {
+	if len(prices) < n {
+		return nil
+	}
+
+	var sma []float64
+
+	for i := n - 1; i < len(prices); i++ {
+		sum := 0.0
+		for j := i - n + 1; j <= i; j++ {
+			sum += prices[j]
+		}
+		sma = append(sma, roundNumber(sum/float64(n)))
+	}
+	if len(sma) < len(prices) {
+		temp := make([]float64, len(prices)-len(sma), len(prices)-len(sma))
+		temp = append(temp, sma...)
+		sma = temp
+	}
+	return sma
 }
 
 // getOpenInterestData 获取OI数据
@@ -459,6 +559,42 @@ func getOpenInterestData(symbol string) (*OIData, error) {
 		Latest:  oi,
 		Average: oi * 0.999, // 近似平均值
 	}, nil
+}
+
+// getOpenInterestHistData 获取持仓数据
+func getOpenInterestHistData(symbol string) ([]float64, error) {
+	url := fmt.Sprintf("https://fapi.binance.com/futures/data/openInterestHist?symbol=%s&period=5m", symbol)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []struct {
+		Symbol               string `json:"symbol"`
+		SumOpenInterest      string `json:"sumOpenInterest"`
+		SumOpenInterestValue string `json:"sumOpenInterestValue"`
+		Timestamp            int64  `json:"timestamp"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	oiSli := make([]float64, 0)
+	for _, s := range result {
+		sv := cast.ToFloat64(s.SumOpenInterestValue)
+		if sv > 0 {
+			oiSli = append(oiSli, sv)
+		}
+	}
+	return oiSli, nil
 }
 
 // getFundingRate 获取资金费率
@@ -498,18 +634,22 @@ func getFundingRate(symbol string) (float64, error) {
 func Format(data *Data) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (6 period) = %.3f\n\n",
-		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI6))
+	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f\n\n",
+		data.CurrentPrice))
 
-	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
-		data.Symbol))
-
-	if data.OpenInterest != nil {
-		sb.WriteString(fmt.Sprintf("Open Interest: Latest: %.2f Average: %.2f\n\n",
-			data.OpenInterest.Latest, data.OpenInterest.Average))
+	if len(data.OISli) > 0 {
+		sb.WriteString(fmt.Sprintf("open interest history indicators (5‑minute intervals, oldest → latest): %s\n\n", formatFloatSlice(data.OISli)))
 	}
 
-	sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
+	//sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
+	//	data.Symbol))
+	//
+	//if data.OpenInterest != nil {
+	//	sb.WriteString(fmt.Sprintf("Open Interest: Latest: %.2f Average: %.2f\n\n",
+	//		data.OpenInterest.Latest, data.OpenInterest.Average))
+	//}
+	//
+	//sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
 
 	if data.IntradaySeries != nil {
 		sb.WriteString("Intraday series (15‑minute intervals, oldest → latest):\n\n")
@@ -538,22 +678,22 @@ func Format(data *Data) string {
 	if data.MiddleTermContext != nil {
 		sb.WriteString("Longer‑term context (1‑hour timeframe):\n\n")
 
-		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
-			data.MiddleTermContext.EMA20, data.LongerTermContext.EMA50))
-
-		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
-			data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
-
-		sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-			data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
-
-		if len(data.MiddleTermContext.MACDValues) > 0 {
-			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
-		}
-
-		if len(data.MiddleTermContext.RSI14Values) > 0 {
-			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
-		}
+		//sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
+		//	data.MiddleTermContext.EMA20, data.LongerTermContext.EMA50))
+		//
+		//sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
+		//	data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
+		//
+		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
+		//	data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+		//
+		//if len(data.MiddleTermContext.MACDValues) > 0 {
+		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
+		//}
+		//
+		//if len(data.MiddleTermContext.RSI14Values) > 0 {
+		//	sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		//}
 
 		if len(data.MiddleTermContext.FVGValues) > 0 {
 			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.MiddleTermContext.FVGValues)))
@@ -566,22 +706,22 @@ func Format(data *Data) string {
 	if data.LongerTermContext != nil {
 		sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
 
-		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
-			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
-
-		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
-			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
-
-		sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-			data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
-
-		if len(data.LongerTermContext.MACDValues) > 0 {
-			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
-		}
-
-		if len(data.LongerTermContext.RSI14Values) > 0 {
-			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
-		}
+		//sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
+		//	data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
+		//
+		//sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
+		//	data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
+		//
+		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
+		//	data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+		//
+		//if len(data.LongerTermContext.MACDValues) > 0 {
+		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
+		//}
+		//
+		//if len(data.LongerTermContext.RSI14Values) > 0 {
+		//	sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		//}
 		if len(data.LongerTermContext.FVGValues) > 0 {
 			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.LongerTermContext.FVGValues)))
 		}
@@ -696,4 +836,24 @@ func identifyValidFVG(kLines []Kline) []FVG {
 	})
 
 	return fvgList
+}
+
+func roundNumber(num float64) float64 {
+	if num == 0 {
+		return num
+	}
+	absNum := math.Abs(num)
+	if absNum > 10 {
+		return mathutil.RoundToFloat(num, 2)
+	} else if absNum > 1 {
+		return mathutil.RoundToFloat(num, 4)
+	} else {
+		temp := absNum
+		loop := 0
+		for temp < 1 {
+			temp *= 10
+			loop++
+		}
+		return mathutil.RoundToFloat(num, loop+3)
+	}
 }

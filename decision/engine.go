@@ -340,6 +340,16 @@ func buildUserPrompt(ctx *Context) string {
 	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
 	displayedCount := 0
 	for _, coin := range ctx.CandidateCoins {
+		isPosition := false
+		for _, position := range ctx.Positions {
+			if position.Symbol == coin.Symbol {
+				isPosition = true
+				break
+			}
+		}
+		if isPosition {
+			continue
+		}
 		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
 		if !hasData {
 			continue
@@ -503,6 +513,8 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		"close_long":  true,
 		"close_short": true,
 		"move_stop":   true,
+		"move_profit": true,
+		"take_profit": true,
 		"hold":        true,
 		"wait":        true,
 	}
@@ -513,6 +525,9 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 
 	if d.Action == "move_stop" && d.StopLoss <= 0 {
 		return fmt.Errorf("止损价必须大于0")
+	}
+	if d.Action == "move_profit" && d.TakeProfit <= 0 {
+		return fmt.Errorf("止盈价必须大于0")
 	}
 	// 开仓操作必须提供完整参数
 	if d.Action == "open_long" || d.Action == "open_short" {
