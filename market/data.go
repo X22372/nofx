@@ -29,7 +29,6 @@ type Data struct {
 	OISli             []float64
 	FundingRate       float64
 	IntradaySeries    *IntradayData
-	Kline15min        []Kline
 	LongerTermContext *LongerTermData
 	MiddleTermContext *LongerTermData
 }
@@ -49,17 +48,16 @@ type DataV2 struct {
 
 type KlinePlus struct {
 	Kline
-	OpenTime    time.Time
-	RSI6Value   float64
-	SMA200Value float64
-	MACDValue   float64
-	BollValue   BollBand
+	RSI6Value   float64  `json:"rsi6"`
+	SMA200Value float64  `json:"sma_200"`
+	MACDValue   float64  `json:"macd"`
+	BollValue   BollBand `json:"boll"`
 }
 
 type BollBand struct {
-	BollUpValue   float64
-	BollDownValue float64
-	BollMidValue  float64
+	BollUpValue   float64 `json:"boll_up"`
+	BollDownValue float64 `json:"boll_down"`
+	BollMidValue  float64 `json:"boll_mid"`
 }
 
 // OIData Open Interest数据
@@ -93,13 +91,13 @@ type LongerTermData struct {
 
 // Kline K线数据
 type Kline struct {
-	OpenTime  int64
-	Open      float64
-	High      float64
-	Low       float64
-	Close     float64
-	Volume    float64
-	CloseTime int64
+	OpenTime  int64   `json:"-"`
+	Open      float64 `json:"-"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+	Volume    float64 `json:"volume"`
+	CloseTime int64   `json:"-"`
 }
 
 // Get 获取指定代币的市场数据
@@ -108,7 +106,7 @@ func Get(symbol string) (*Data, error) {
 	symbol = Normalize(symbol)
 
 	// 获取15分钟K线数据 (最近10个)
-	klines15m, err := getKlines(symbol, "15m", 16) // 多获取一些用于计算
+	klines15m, err := getKlines(symbol, "15m", 24) // 多获取一些用于计算
 	if err != nil {
 		return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
 	}
@@ -158,10 +156,10 @@ func Get(symbol string) (*Data, error) {
 	}
 
 	//// 获取Funding Rate
-	//fundingRate, _ := getFundingRate(symbol)
+	fundingRate, _ := getFundingRate(symbol)
 
 	// 计算日内系列数据
-	//intradayData := calculateIntradaySeries(klines15m)
+	intradayData := calculateIntradaySeries(klines15m)
 
 	// 计算长期数据
 	middleTermData := calculateLongerTermData(klines1h)
@@ -177,10 +175,9 @@ func Get(symbol string) (*Data, error) {
 		CurrentEMA20:  currentEMA20,
 		CurrentMACD:   currentMACD,
 		CurrentRSI6:   currentRSI6,
-		Kline15min:    klines15m,
 		//OpenInterest:  oiData,
-		//FundingRate:   fundingRate,
-		//IntradaySeries:    intradayData,
+		FundingRate:       fundingRate,
+		IntradaySeries:    intradayData,
 		OISli:             oiData,
 		LongerTermContext: longerTermData,
 		MiddleTermContext: middleTermData,
@@ -401,11 +398,11 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 
 	// 计算EMA
 	//data.EMA20 = calculateEMA(klines, 20)
-	//data.EMA50 = calculateEMA(klines, 50)
+	data.EMA50 = calculateEMA(klines, 50)
 	//
-	//// 计算ATR
-	//data.ATR3 = calculateATR(klines, 3)
-	//data.ATR14 = calculateATR(klines, 14)
+	// 计算ATR
+	data.ATR3 = calculateATR(klines, 3)
+	data.ATR14 = calculateATR(klines, 14)
 
 	// 计算成交量
 	//if len(klines) > 0 {
@@ -432,7 +429,6 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	smaSli := calculateSMA(closeSli, 200)
 	for i := range data.KlineValues {
 		data.KlineValues[i].Kline = klines[i]
-		data.KlineValues[i].OpenTime = timestampToTime(klines[i].OpenTime)
 		boll := BollBand{
 			BollUpValue:   upSli[i],
 			BollDownValue: midSli[i],
@@ -677,19 +673,15 @@ func Format(data *Data) string {
 		}
 	}
 
-	if len(data.Kline15min) > 0 {
-		sb.WriteString(fmt.Sprintf("Intraday kline json data (15‑minute intervals, oldest → latest): %s\n\n", convertor.ToString(data.Kline15min)))
-	}
-
 	if data.MiddleTermContext != nil {
 		sb.WriteString("Longer‑term context (1‑hour timeframe):\n\n")
 
-		//sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
-		//	data.MiddleTermContext.EMA20, data.LongerTermContext.EMA50))
+		sb.WriteString(fmt.Sprintf("50‑Period EMA: %.3f\n\n",
+			data.LongerTermContext.EMA50))
 		//
-		//sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
-		//	data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
-		//
+		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
+			data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
+
 		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
 		//	data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
 		//
@@ -712,12 +704,12 @@ func Format(data *Data) string {
 	if data.LongerTermContext != nil {
 		sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
 
-		//sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
-		//	data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
+		sb.WriteString(fmt.Sprintf("50‑Period EMA: %.3f\n\n",
+			data.LongerTermContext.EMA50))
 		//
-		//sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
-		//	data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
-		//
+		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
+			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
+
 		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
 		//	data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
 		//
