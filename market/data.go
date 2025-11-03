@@ -29,6 +29,7 @@ type Data struct {
 	OISli             []float64
 	FundingRate       float64
 	IntradaySeries    *IntradayData
+	Kline15min        []Kline
 	LongerTermContext *LongerTermData
 	MiddleTermContext *LongerTermData
 }
@@ -107,10 +108,10 @@ func Get(symbol string) (*Data, error) {
 	symbol = Normalize(symbol)
 
 	// 获取15分钟K线数据 (最近10个)
-	//klines15m, err := getKlines(symbol, "15m", 60) // 多获取一些用于计算
-	//if err != nil {
-	//	return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
-	//}
+	klines15m, err := getKlines(symbol, "15m", 16) // 多获取一些用于计算
+	if err != nil {
+		return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
+	}
 
 	// 获取1小时K线数据 (最近10个)
 	klines1h, err := getKlines(symbol, "1h", 300) // 多获取一些用于计算
@@ -176,6 +177,7 @@ func Get(symbol string) (*Data, error) {
 		CurrentEMA20:  currentEMA20,
 		CurrentMACD:   currentMACD,
 		CurrentRSI6:   currentRSI6,
+		Kline15min:    klines15m,
 		//OpenInterest:  oiData,
 		//FundingRate:   fundingRate,
 		//IntradaySeries:    intradayData,
@@ -454,7 +456,7 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 			data.RSI14Values = append(data.RSI14Values, rsi14)
 		}
 	}
-	data.KlineValues = data.KlineValues[len(data.KlineValues)-48:]
+	data.KlineValues = data.KlineValues[len(data.KlineValues)-24:]
 
 	return data
 }
@@ -673,6 +675,10 @@ func Format(data *Data) string {
 		if len(data.IntradaySeries.RSI14Values) > 0 {
 			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.IntradaySeries.RSI14Values)))
 		}
+	}
+
+	if len(data.Kline15min) > 0 {
+		sb.WriteString(fmt.Sprintf("Intraday kline json data (15‑minute intervals, oldest → latest): %s\n\n", convertor.ToString(data.Kline15min)))
 	}
 
 	if data.MiddleTermContext != nil {
