@@ -448,9 +448,9 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 计算盈亏百分比
 		pnlPct := 0.0
 		if side == "long" {
-			pnlPct = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
+			pnlPct = ((markPrice - entryPrice) / entryPrice) * 100
 		} else {
-			pnlPct = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
+			pnlPct = ((entryPrice - markPrice) / entryPrice) * 100
 		}
 
 		// 跟踪持仓首次出现时间
