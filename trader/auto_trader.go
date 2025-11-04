@@ -798,7 +798,7 @@ func (at *AutoTrader) executeTakeProfitWithRecord(decision *decision.Decision, a
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
-	// 修改止盈
+	// 止盈一半
 	positionMapList, _ := at.trader.GetPositions()
 	for _, m := range positionMapList {
 		if cast.ToString(m["symbol"]) == decision.Symbol {
@@ -811,7 +811,8 @@ func (at *AutoTrader) executeTakeProfitWithRecord(decision *decision.Decision, a
 			if err != nil {
 				return err
 			}
-			log.Printf("  ✓ 止盈一半成功")
+			err = at.trader.SetStopLoss(decision.Symbol, cast.ToString(m["side"]), 0, mathutil.RoundToFloat(cast.ToFloat64(m["entryPrice"]), 2))
+			log.Printf("  ✓ 止盈一半设置保本成功")
 
 		}
 	}

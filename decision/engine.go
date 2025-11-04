@@ -256,7 +256,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	// 2. 硬约束（风险控制）- 动态生成
 	sb.WriteString("# 硬约束（风险控制）\n\n")
 	sb.WriteString("1. 风险回报比: 必须 ≥ 1:3\n")
-	sb.WriteString("2. 最多持仓: 4个币种（质量>数量）\n")
+	sb.WriteString("2. 最多持仓: 5个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. 单币仓位: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
 		accountEquity*0.8, accountEquity*1.2, altcoinLeverage, accountEquity*3, accountEquity*6, btcEthLeverage))
 	sb.WriteString("4. 保证金: 总使用率 ≤ 90%\n\n")
@@ -265,13 +265,14 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("#输出格式\n\n")
 	sb.WriteString("第一步: 思维链（纯文本）\n")
 	sb.WriteString("分析你的思考过程\n\n")
+	sb.WriteString("如有开仓，给出详细的进场价格理由，以及止盈止损价格的理由\n\n")
 	sb.WriteString("第二步: JSON决策数组\n\n")
 	sb.WriteString("```json\n[\n")
 	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
 	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
 	sb.WriteString("]\n```\n\n")
 	sb.WriteString("字段说明:\n")
-	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait | move_stop\n")
+	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait | take_profit\n")
 	sb.WriteString("- `confidence`: 0-100（开仓建议≥80）\n")
 	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
 
