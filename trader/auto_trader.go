@@ -811,7 +811,10 @@ func (at *AutoTrader) executeTakeProfitWithRecord(decision *decision.Decision, a
 			if err != nil {
 				return err
 			}
-			log.Printf("  ✓ 止盈一半成功")
+
+			err = at.trader.SetTakeProfit(decision.Symbol, cast.ToString(m["side"]), 0, mathutil.RoundToFloat(cast.ToFloat64(m["entryPrice"]), 2))
+
+			log.Printf("  ✓ 止盈一半设置保本成功")
 
 		}
 	}
