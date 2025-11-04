@@ -22,7 +22,7 @@ type Data struct {
 	CurrentPrice      float64
 	PriceChange1h     float64 // 1小时价格变化百分比
 	PriceChange4h     float64 // 4小时价格变化百分比
-	CurrentEMA20      float64
+	CurrentEMA12      float64
 	CurrentMACD       float64
 	CurrentRSI6       float64
 	OpenInterest      *OIData
@@ -125,7 +125,7 @@ func Get(symbol string) (*Data, error) {
 
 	// 计算当前指标 (基于1小时最新数据)
 	currentPrice := klines1h[len(klines1h)-1].Close
-	currentEMA20 := calculateEMA(klines1h, 20)
+	currentEMA12 := calculateEMA(klines1h, 12)
 	currentMACD := calculateMACD(klines1h)
 	currentRSI6 := calculateRSI(klines1h, 6)
 
@@ -172,7 +172,7 @@ func Get(symbol string) (*Data, error) {
 		CurrentPrice:  currentPrice,
 		PriceChange1h: priceChange1h,
 		PriceChange4h: priceChange4h,
-		CurrentEMA20:  currentEMA20,
+		CurrentEMA12:  currentEMA12,
 		CurrentMACD:   currentMACD,
 		CurrentRSI6:   currentRSI6,
 		//OpenInterest:  oiData,
@@ -632,8 +632,8 @@ func getFundingRate(symbol string) (float64, error) {
 func Format(data *Data) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f\n\n",
-		data.CurrentPrice))
+	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f, current_ema12 = %.2f\n\n",
+		data.CurrentPrice, data.CurrentEMA12))
 
 	if len(data.OISli) > 0 {
 		sb.WriteString(fmt.Sprintf("open interest history indicators (5‑minute intervals, oldest → latest): %s\n\n", formatFloatSlice(data.OISli)))
