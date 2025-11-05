@@ -405,15 +405,15 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	data.ATR14 = calculateATR(klines, 14)
 
 	// 计算成交量
-	//if len(klines) > 0 {
-	//	data.CurrentVolume = klines[len(klines)-1].Volume
-	//	// 计算平均成交量
-	//	sum := 0.0
-	//	for _, k := range klines {
-	//		sum += k.Volume
-	//	}
-	//	data.AverageVolume = sum / float64(len(klines))
-	//}
+	if len(klines) > 0 {
+		data.CurrentVolume = klines[len(klines)-1].Volume
+		// 计算平均成交量
+		sum := 0.0
+		for _, k := range klines {
+			sum += k.Volume
+		}
+		data.AverageVolume = sum / float64(len(klines))
+	}
 
 	// 计算MACD和RSI序列
 	start := len(klines) - 100
@@ -682,9 +682,9 @@ func Format(data *Data) string {
 		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
 			data.MiddleTermContext.ATR3, data.LongerTermContext.ATR14))
 
-		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-		//	data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
-		//
+		sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
+			data.MiddleTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+
 		//if len(data.MiddleTermContext.MACDValues) > 0 {
 		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		//}
@@ -697,7 +697,7 @@ func Format(data *Data) string {
 			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.MiddleTermContext.FVGValues)))
 		}
 		if len(data.MiddleTermContext.KlineValues) > 0 {
-			sb.WriteString(fmt.Sprintf("KLine json data: %s\n\n", convertor.ToString(data.MiddleTermContext.KlineValues)))
+			sb.WriteString(fmt.Sprintf("technology json data: %s\n\n", convertor.ToString(data.MiddleTermContext.KlineValues)))
 		}
 	}
 
@@ -710,8 +710,8 @@ func Format(data *Data) string {
 		sb.WriteString(fmt.Sprintf("3‑Period ATR: %.3f vs. 14‑Period ATR: %.3f\n\n",
 			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
 
-		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-		//data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+		sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
+			data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
 
 		//if len(data.LongerTermContext.MACDValues) > 0 {
 		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
@@ -724,7 +724,7 @@ func Format(data *Data) string {
 			sb.WriteString(fmt.Sprintf("FVG(Fair Value Gap) json data: %s\n\n", convertor.ToString(data.LongerTermContext.FVGValues)))
 		}
 		if len(data.LongerTermContext.KlineValues) > 0 {
-			sb.WriteString(fmt.Sprintf("KLine json data: %s\n\n", convertor.ToString(data.LongerTermContext.KlineValues)))
+			sb.WriteString(fmt.Sprintf("technology json data: %s\n\n", convertor.ToString(data.LongerTermContext.KlineValues)))
 		}
 	}
 
