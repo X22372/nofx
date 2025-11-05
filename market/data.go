@@ -47,7 +47,7 @@ type DataV2 struct {
 }
 
 type KlinePlus struct {
-	Kline
+	ClosePrice  float64  `json:"close_price"`
 	RSI6Value   float64  `json:"rsi6"`
 	SMA200Value float64  `json:"sma_200"`
 	MACDValue   float64  `json:"macd"`
@@ -428,7 +428,7 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	upSli, midSli, lowSli := calculateBollingerBands(closeSli, 21, 2)
 	smaSli := calculateSMA(closeSli, 200)
 	for i := range data.KlineValues {
-		data.KlineValues[i].Kline = klines[i]
+		data.KlineValues[i].ClosePrice = klines[i].Close
 		boll := BollBand{
 			BollUpValue:   upSli[i],
 			BollDownValue: midSli[i],
@@ -711,8 +711,8 @@ func Format(data *Data) string {
 			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
 
 		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-		//	data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
-		//
+		//data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+
 		//if len(data.LongerTermContext.MACDValues) > 0 {
 		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		//}
