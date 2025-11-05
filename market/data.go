@@ -22,7 +22,7 @@ type Data struct {
 	CurrentPrice      float64
 	PriceChange1h     float64 // 1小时价格变化百分比
 	PriceChange4h     float64 // 4小时价格变化百分比
-	CurrentEMA20      float64
+	CurrentEMA12      float64
 	CurrentMACD       float64
 	CurrentRSI6       float64
 	OpenInterest      *OIData
@@ -47,7 +47,7 @@ type DataV2 struct {
 }
 
 type KlinePlus struct {
-	Kline
+	ClosePrice  float64  `json:"close_price"`
 	RSI6Value   float64  `json:"rsi6"`
 	SMA200Value float64  `json:"sma_200"`
 	MACDValue   float64  `json:"macd"`
@@ -125,7 +125,7 @@ func Get(symbol string) (*Data, error) {
 
 	// 计算当前指标 (基于1小时最新数据)
 	currentPrice := klines1h[len(klines1h)-1].Close
-	currentEMA20 := calculateEMA(klines1h, 20)
+	currentEMA12 := calculateEMA(klines1h, 12)
 	currentMACD := calculateMACD(klines1h)
 	currentRSI6 := calculateRSI(klines1h, 6)
 
@@ -172,7 +172,7 @@ func Get(symbol string) (*Data, error) {
 		CurrentPrice:  currentPrice,
 		PriceChange1h: priceChange1h,
 		PriceChange4h: priceChange4h,
-		CurrentEMA20:  currentEMA20,
+		CurrentEMA12:  currentEMA12,
 		CurrentMACD:   currentMACD,
 		CurrentRSI6:   currentRSI6,
 		//OpenInterest:  oiData,
@@ -428,7 +428,7 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 	upSli, midSli, lowSli := calculateBollingerBands(closeSli, 21, 2)
 	smaSli := calculateSMA(closeSli, 200)
 	for i := range data.KlineValues {
-		data.KlineValues[i].Kline = klines[i]
+		data.KlineValues[i].ClosePrice = klines[i].Close
 		boll := BollBand{
 			BollUpValue:   upSli[i],
 			BollDownValue: midSli[i],
@@ -632,8 +632,8 @@ func getFundingRate(symbol string) (float64, error) {
 func Format(data *Data) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f\n\n",
-		data.CurrentPrice))
+	sb.WriteString(fmt.Sprintf("1‑hour timeframe: current_price = %.2f, current_ema12 = %.2f\n\n",
+		data.CurrentPrice, data.CurrentEMA12))
 
 	if len(data.OISli) > 0 {
 		sb.WriteString(fmt.Sprintf("open interest history indicators (5‑minute intervals, oldest → latest): %s\n\n", formatFloatSlice(data.OISli)))
@@ -711,8 +711,8 @@ func Format(data *Data) string {
 			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14))
 
 		//sb.WriteString(fmt.Sprintf("Current Volume: %.3f vs. Average Volume: %.3f\n\n",
-		//	data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
-		//
+		//data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+
 		//if len(data.LongerTermContext.MACDValues) > 0 {
 		//	sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		//}
