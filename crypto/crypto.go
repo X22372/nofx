@@ -13,9 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -23,7 +21,12 @@ import (
 const (
 	storagePrefix    = "ENC:v1:"
 	storageDelimiter = ":"
-	dataKeyEnvName   = "DATA_ENCRYPTION_KEY"
+)
+
+// Environment variable names
+const (
+	EnvDataEncryptionKey = "DATA_ENCRYPTION_KEY" // AES data encryption key (Base64)
+	EnvRSAPrivateKey     = "RSA_PRIVATE_KEY"     // RSA private key (PEM format, use \n for newlines)
 )
 
 type EncryptedPayload struct {
@@ -48,26 +51,15 @@ type CryptoService struct {
 	dataKey    []byte
 }
 
-func NewCryptoService(privateKeyPath string) (*CryptoService, error) {
-	// 读取私钥文件
-	privateKeyPEM, err := ioutil.ReadFile(privateKeyPath)
+// NewCryptoService creates crypto service (loads keys from environment variables)
+func NewCryptoService() (*CryptoService, error) {
+	// 1. Load RSA private key
+	privateKey, err := loadRSAPrivateKeyFromEnv()
 	if err != nil {
-		// 如果私钥文件不存在，生成新的密钥对
-		if err := GenerateRSAKeyPair(privateKeyPath); err != nil {
-			return nil, fmt.Errorf("failed to generate RSA key pair: %w", err)
-		}
-		privateKeyPEM, err = ioutil.ReadFile(privateKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read generated private key: %w", err)
-		}
+		return nil, fmt.Errorf("failed to load RSA private key: %w", err)
 	}
 
-	// 解析私钥
-	privateKey, err := ParseRSAPrivateKeyFromPEM(privateKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
+	// 2. Load AES data encryption key
 	dataKey, err := loadDataKeyFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load data encryption key: %w", err)
@@ -80,56 +72,43 @@ func NewCryptoService(privateKeyPath string) (*CryptoService, error) {
 	}, nil
 }
 
-func GenerateRSAKeyPair(privateKeyPath string) error {
-	// 确保目录存在
-	dir := filepath.Dir(privateKeyPath)
-	if dir != "." {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
+// loadRSAPrivateKeyFromEnv loads RSA private key from environment variable
+func loadRSAPrivateKeyFromEnv() (*rsa.PrivateKey, error) {
+	keyPEM := os.Getenv(EnvRSAPrivateKey)
+	if keyPEM == "" {
+		return nil, fmt.Errorf("environment variable %s not set, please configure RSA private key in .env", EnvRSAPrivateKey)
 	}
 
-	// 生成 RSA 密钥对
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return err
-	}
+	// Handle newlines in environment variable (\n -> actual newline)
+	keyPEM = strings.ReplaceAll(keyPEM, "\\n", "\n")
 
-	// 编码私钥
-	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	})
-
-	// 保存私钥
-	if err := ioutil.WriteFile(privateKeyPath, privateKeyPEM, 0600); err != nil {
-		return err
-	}
-
-	// 编码公钥
-	publicKeyDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		return err
-	}
-
-	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: publicKeyDER,
-	})
-
-	// 保存公钥
-	publicKeyPath := privateKeyPath + ".pub"
-	if err := ioutil.WriteFile(publicKeyPath, publicKeyPEM, 0644); err != nil {
-		return err
-	}
-
-	return nil
+	return ParseRSAPrivateKeyFromPEM([]byte(keyPEM))
 }
 
+// loadDataKeyFromEnv loads AES data encryption key from environment variable
+func loadDataKeyFromEnv() ([]byte, error) {
+	keyStr := strings.TrimSpace(os.Getenv(EnvDataEncryptionKey))
+	if keyStr == "" {
+		return nil, fmt.Errorf("environment variable %s not set, please configure data encryption key in .env", EnvDataEncryptionKey)
+	}
+
+	// Try to decode
+	if key, ok := decodePossibleKey(keyStr); ok {
+		return key, nil
+	}
+
+	// If decoding fails, use SHA256 hash as key
+	sum := sha256.Sum256([]byte(keyStr))
+	key := make([]byte, len(sum))
+	copy(key, sum[:])
+	return key, nil
+}
+
+// ParseRSAPrivateKeyFromPEM parses RSA private key from PEM format
 func ParseRSAPrivateKeyFromPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
-		return nil, errors.New("no PEM block found")
+		return nil, errors.New("invalid PEM format")
 	}
 
 	switch block.Type {
@@ -150,22 +129,7 @@ func ParseRSAPrivateKeyFromPEM(pemBytes []byte) (*rsa.PrivateKey, error) {
 	}
 }
 
-func loadDataKeyFromEnv() ([]byte, error) {
-	keyStr := strings.TrimSpace(os.Getenv(dataKeyEnvName))
-	if keyStr == "" {
-		return nil, fmt.Errorf("%s not set", dataKeyEnvName)
-	}
-
-	if key, ok := decodePossibleKey(keyStr); ok {
-		return key, nil
-	}
-
-	sum := sha256.Sum256([]byte(keyStr))
-	key := make([]byte, len(sum))
-	copy(key, sum[:])
-	return key, nil
-}
-
+// decodePossibleKey tries to decode key using multiple encoding methods
 func decodePossibleKey(value string) ([]byte, bool) {
 	decoders := []func(string) ([]byte, error){
 		base64.StdEncoding.DecodeString,
@@ -184,6 +148,7 @@ func decodePossibleKey(value string) ([]byte, bool) {
 	return nil, false
 }
 
+// normalizeAESKey normalizes AES key length
 func normalizeAESKey(raw []byte) ([]byte, bool) {
 	switch len(raw) {
 	case 16, 24, 32:
@@ -258,23 +223,23 @@ func (cs *CryptoService) DecryptFromStorage(value string, aadParts ...string) (s
 		return "", errors.New("data encryption key not configured")
 	}
 	if !isEncryptedStorageValue(value) {
-		return "", errors.New("value is not encrypted")
+		return "", errors.New("data not encrypted")
 	}
 
 	payload := strings.TrimPrefix(value, storagePrefix)
 	parts := strings.SplitN(payload, storageDelimiter, 2)
 	if len(parts) != 2 {
-		return "", errors.New("invalid encrypted payload format")
+		return "", errors.New("invalid encrypted data format")
 	}
 
 	nonce, err := base64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", fmt.Errorf("decode nonce failed: %w", err)
+		return "", fmt.Errorf("failed to decode nonce: %w", err)
 	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("decode ciphertext failed: %w", err)
+		return "", fmt.Errorf("failed to decode ciphertext: %w", err)
 	}
 
 	block, err := aes.NewCipher(cs.dataKey)
@@ -288,7 +253,7 @@ func (cs *CryptoService) DecryptFromStorage(value string, aadParts ...string) (s
 	}
 
 	if len(nonce) != gcm.NonceSize() {
-		return "", fmt.Errorf("invalid nonce size: expected %d, got %d", gcm.NonceSize(), len(nonce))
+		return "", fmt.Errorf("invalid nonce length: expected %d, got %d", gcm.NonceSize(), len(nonce))
 	}
 
 	aad := composeAAD(aadParts)
@@ -316,7 +281,7 @@ func isEncryptedStorageValue(value string) bool {
 }
 
 func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, error) {
-	// 1. 验证时间戳（防止重放攻击）
+	// 1. Validate timestamp (prevent replay attacks)
 	if payload.TS != 0 {
 		elapsed := time.Since(time.Unix(payload.TS, 0))
 		if elapsed > 5*time.Minute || elapsed < -1*time.Minute {
@@ -324,7 +289,7 @@ func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, erro
 		}
 	}
 
-	// 2. 解码 base64url
+	// 2. Decode base64url
 	wrappedKey, err := base64.RawURLEncoding.DecodeString(payload.WrappedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode wrapped key: %w", err)
@@ -347,21 +312,19 @@ func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, erro
 			return nil, fmt.Errorf("failed to decode AAD: %w", err)
 		}
 
-		// 验证 AAD
 		var aadData AADData
 		if err := json.Unmarshal(aad, &aadData); err == nil {
-			// 可以在这里添加额外的验证逻辑
-			// 例如：验证 sessionID、userID 等
+			// Additional validation logic can be added here
 		}
 	}
 
-	// 3. 使用 RSA-OAEP 解密 AES 密钥
+	// 3. Decrypt AES key using RSA-OAEP
 	aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, cs.privateKey, wrappedKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unwrap AES key: %w", err)
+		return nil, fmt.Errorf("RSA decryption failed: %w", err)
 	}
 
-	// 4. 使用 AES-GCM 解密数据
+	// 4. Decrypt data using AES-GCM
 	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
@@ -373,13 +336,12 @@ func (cs *CryptoService) DecryptPayload(payload *EncryptedPayload) ([]byte, erro
 	}
 
 	if len(iv) != gcm.NonceSize() {
-		return nil, fmt.Errorf("invalid IV size: expected %d, got %d", gcm.NonceSize(), len(iv))
+		return nil, fmt.Errorf("invalid IV length: expected %d, got %d", gcm.NonceSize(), len(iv))
 	}
 
-	// 解密并验证认证标签
 	plaintext, err := gcm.Open(nil, iv, ciphertext, aad)
 	if err != nil {
-		return nil, fmt.Errorf("authentication/decryption failed: %w", err)
+		return nil, fmt.Errorf("decryption verification failed: %w", err)
 	}
 
 	return plaintext, nil
@@ -391,4 +353,42 @@ func (cs *CryptoService) DecryptSensitiveData(payload *EncryptedPayload) (string
 		return "", err
 	}
 	return string(plaintext), nil
+}
+
+// GenerateKeyPair generates RSA key pair (for key generation during initialization)
+// Returns PEM format private key and public key
+func GenerateKeyPair() (privateKeyPEM, publicKeyPEM string, err error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Encode private key
+	privPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+
+	// Encode public key
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: publicKeyDER,
+	})
+
+	return string(privPEM), string(pubPEM), nil
+}
+
+// GenerateDataKey generates AES data encryption key
+// Returns Base64 encoded 32-byte key
+func GenerateDataKey() (string, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(key), nil
 }

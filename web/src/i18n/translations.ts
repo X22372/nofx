@@ -9,6 +9,7 @@ export const translations = {
     details: 'Details',
     tradingPanel: 'Trading Panel',
     competition: 'Competition',
+    backtest: 'Backtest',
     running: 'RUNNING',
     stopped: 'STOPPED',
     adminMode: 'Admin Mode',
@@ -20,6 +21,7 @@ export const translations = {
     realtimeNav: 'Live',
     configNav: 'Config',
     dashboardNav: 'Dashboard',
+    strategyNav: 'Strategy',
     faqNav: 'FAQ',
 
     // Footer
@@ -82,6 +84,176 @@ export const translations = {
     currentGap: 'Current Gap',
     count: '{count} pts',
 
+    // TradingView Chart
+    marketChart: 'Market Chart',
+    viewChart: 'Click to view chart',
+    enterSymbol: 'Enter symbol...',
+    popularSymbols: 'Popular Symbols',
+    fullscreen: 'Fullscreen',
+    exitFullscreen: 'Exit Fullscreen',
+
+    // Backtest Page
+    backtestPage: {
+      title: 'Backtest Lab',
+      subtitle: 'Pick a model + time range to replay the full AI decision loop.',
+      start: 'Start Backtest',
+      starting: 'Starting...',
+      quickRanges: {
+        h24: '24h',
+        d3: '3d',
+        d7: '7d',
+      },
+      actions: {
+        pause: 'Pause',
+        resume: 'Resume',
+        stop: 'Stop',
+      },
+      states: {
+        running: 'Running',
+        paused: 'Paused',
+        completed: 'Completed',
+        failed: 'Failed',
+        liquidated: 'Liquidated',
+      },
+      form: {
+        aiModelLabel: 'AI Model',
+        selectAiModel: 'Select AI model',
+        providerLabel: 'Provider',
+        statusLabel: 'Status',
+        enabled: 'Enabled',
+        disabled: 'Disabled',
+        noModelWarning:
+          'Please add and enable an AI model on the Model Config page first.',
+        runIdLabel: 'Run ID',
+        runIdPlaceholder: 'Leave blank to auto-generate',
+        decisionTfLabel: 'Decision TF',
+        cadenceLabel: 'Decision cadence (bars)',
+        timeRangeLabel: 'Time range',
+        symbolsLabel: 'Symbols (comma-separated)',
+        customTfPlaceholder: 'Custom TFs (comma separated, e.g. 2h,6h)',
+        initialBalanceLabel: 'Initial balance (USDT)',
+        feeLabel: 'Fee (bps)',
+      slippageLabel: 'Slippage (bps)',
+      btcEthLeverageLabel: 'BTC/ETH leverage (x)',
+      altcoinLeverageLabel: 'Altcoin leverage (x)',
+      fillPolicies: {
+        nextOpen: 'Next open',
+        barVwap: 'Bar VWAP',
+        midPrice: 'Mid price',
+        },
+        promptPresets: {
+          baseline: 'Baseline',
+          aggressive: 'Aggressive',
+          conservative: 'Conservative',
+          scalping: 'Scalping',
+        },
+        cacheAiLabel: 'Reuse AI cache',
+        replayOnlyLabel: 'Replay only',
+        overridePromptLabel: 'Use only custom prompt',
+        customPromptLabel: 'Custom prompt (optional)',
+        customPromptPlaceholder:
+          'Append or fully customize the strategy prompt',
+      },
+      runList: {
+        title: 'Runs',
+        count: 'Total {count} records',
+      },
+      filters: {
+        allStates: 'All states',
+        searchPlaceholder: 'Run ID / label',
+      },
+      tableHeaders: {
+        runId: 'Run ID',
+        label: 'Label',
+        state: 'State',
+        progress: 'Progress',
+        equity: 'Equity',
+        lastError: 'Last Error',
+        updated: 'Updated',
+      },
+      emptyStates: {
+        noRuns: 'No runs yet',
+        selectRun: 'Select a run to view details',
+      },
+      detail: {
+        tfAndSymbols: 'TF: {tf} · Symbols {count}',
+        labelPlaceholder: 'Label note',
+        saveLabel: 'Save',
+        deleteLabel: 'Delete',
+        exportLabel: 'Export',
+        errorLabel: 'Error',
+      },
+      toasts: {
+        selectModel: 'Please select an AI model first.',
+        modelDisabled: 'AI model {name} is disabled.',
+        invalidRange: 'End time must be later than start time.',
+        startSuccess: 'Backtest {id} started.',
+        startFailed: 'Failed to start. Please try again later.',
+        actionSuccess: '{action} {id} succeeded.',
+        actionFailed: 'Operation failed. Please try again later.',
+        labelSaved: 'Label updated.',
+        labelFailed: 'Failed to update label.',
+        confirmDelete: 'Delete backtest {id}? This action cannot be undone.',
+        deleteSuccess: 'Backtest record deleted.',
+        deleteFailed: 'Failed to delete. Please try again later.',
+        traceFailed: 'Failed to fetch AI trace.',
+        exportSuccess: 'Exported data for {id}.',
+        exportFailed: 'Failed to export.',
+      },
+      aiTrace: {
+        title: 'AI Trace',
+        clear: 'Clear',
+        cyclePlaceholder: 'Cycle',
+        fetch: 'Fetch',
+        prompt: 'Prompt',
+        cot: 'Chain of thought',
+        output: 'Output',
+        cycleTag: 'Cycle #{cycle}',
+      },
+      decisionTrail: {
+        title: 'AI Decision Trail',
+        subtitle: 'Showing last {count} cycles',
+        empty: 'No records yet',
+        emptyHint: 'The AI thought & execution log will appear once the run starts.',
+      },
+      charts: {
+        equityTitle: 'Equity Curve',
+        equityEmpty: 'No data yet',
+      },
+      metrics: {
+        title: 'Metrics',
+        totalReturn: 'Total Return %',
+        maxDrawdown: 'Max Drawdown %',
+        sharpe: 'Sharpe',
+        profitFactor: 'Profit Factor',
+        pending: 'Calculating...',
+        realized: 'Realized PnL',
+        unrealized: 'Unrealized PnL',
+      },
+      trades: {
+        title: 'Trade Events',
+        headers: {
+          time: 'Time',
+          symbol: 'Symbol',
+          action: 'Action',
+          qty: 'Qty',
+          leverage: 'Leverage',
+          pnl: 'PnL',
+        },
+        empty: 'No trades yet',
+      },
+      metadata: {
+        title: 'Metadata',
+        created: 'Created',
+        updated: 'Updated',
+        processedBars: 'Processed Bars',
+        maxDrawdown: 'Max DD',
+        liquidated: 'Liquidated',
+        yes: 'Yes',
+        no: 'No',
+      },
+    },
+
     // Competition Page
     aiCompetition: 'AI Competition',
     traders: 'traders',
@@ -100,40 +272,6 @@ export const translations = {
     equity: 'Equity',
     pnl: 'P&L',
     pos: 'Pos',
-
-    // AI Learning
-    aiLearning: 'AI Learning & Reflection',
-    tradesAnalyzed: '{count} trades analyzed · Real-time evolution',
-    latestReflection: 'Latest Reflection',
-    fullCoT: 'Full Chain of Thought',
-    totalTrades: 'Total Trades',
-    winRate: 'Win Rate',
-    avgWin: 'Avg Win',
-    avgLoss: 'Avg Loss',
-    profitFactor: 'Profit Factor',
-    avgWinDivLoss: 'Avg Win ÷ Avg Loss',
-    excellent: '🔥 Excellent - Strong profitability',
-    good: '✓ Good - Stable profits',
-    fair: '⚠️ Fair - Needs optimization',
-    poor: '❌ Poor - Losses exceed gains',
-    bestPerformer: 'Best Performer',
-    worstPerformer: 'Worst Performer',
-    symbolPerformance: 'Symbol Performance',
-    tradeHistory: 'Trade History',
-    completedTrades: 'Recent {count} completed trades',
-    noCompletedTrades: 'No completed trades yet',
-    completedTradesWillAppear: 'Completed trades will appear here',
-    entry: 'Entry',
-    exit: 'Exit',
-    stopLoss: 'Stop Loss',
-    latest: 'Latest',
-
-    // AI Learning Description
-    howAILearns: 'How AI Learns & Evolves',
-    aiLearningPoint1: 'Analyzes last 20 trading cycles before each decision',
-    aiLearningPoint2: 'Identifies best & worst performing symbols',
-    aiLearningPoint3: 'Optimizes position sizing based on win rate',
-    aiLearningPoint4: 'Avoids repeating past mistakes',
 
     // AI Traders Management
     manageAITraders: 'Manage your AI trading bots',
@@ -222,6 +360,21 @@ export const translations = {
       'API wallet private key - Get from https://www.asterdex.com/en/api-wallet (only used locally for signing, never transmitted)',
     asterUsdtWarning:
       'Important: Aster only tracks USDT balance. Please ensure you use USDT as margin currency to avoid P&L calculation errors caused by price fluctuations of other assets (BNB, ETH, etc.)',
+
+    // LIGHTER Configuration
+    lighterWalletAddress: 'L1 Wallet Address',
+    lighterPrivateKey: 'L1 Private Key',
+    lighterApiKeyPrivateKey: 'API Key Private Key',
+    enterLighterWalletAddress: 'Enter Ethereum wallet address (0x...)',
+    enterLighterPrivateKey: 'Enter L1 private key (32 bytes)',
+    enterLighterApiKeyPrivateKey: 'Enter API Key private key (40 bytes, optional)',
+    lighterWalletAddressDesc: 'Your Ethereum wallet address for account identification',
+    lighterPrivateKeyDesc: 'L1 private key for account identification (32-byte ECDSA key)',
+    lighterApiKeyPrivateKeyDesc: 'API Key private key for transaction signing (40-byte Poseidon2 key)',
+    lighterApiKeyOptionalNote: 'Without API Key, system will use limited V1 mode',
+    lighterV1Description: 'Basic Mode - Limited functionality, testing framework only',
+    lighterV2Description: 'Full Mode - Supports Poseidon2 signing and real trading',
+    lighterPrivateKeyImported: 'LIGHTER private key imported',
 
     // Exchange names
     hyperliquidExchangeName: 'Hyperliquid',
@@ -321,9 +474,6 @@ export const translations = {
 
     // Loading & Error
     loading: 'Loading...',
-    loadingError: '⚠️ Failed to load AI learning data',
-    noCompleteData:
-      'No complete trading data (needs to complete open → close cycle)',
 
     // AI Traders Page - Additional
     inUse: 'In Use',
@@ -776,7 +926,7 @@ export const translations = {
     // Data & Privacy
     faqDataStorage: 'Where is my data stored?',
     faqDataStorageAnswer:
-      'All data is stored locally on your machine in SQLite databases: config.db (trader configurations), trading.db (trade history), and decision_logs/ (AI decision records).',
+      'All data is stored locally on your machine in SQLite databases: data.db (all configurations and trade history), and decision_logs/ (AI decision records).',
 
     faqApiKeySecurity: 'Is my API key secure?',
     faqApiKeySecurityAnswer:
@@ -857,6 +1007,7 @@ export const translations = {
     details: '详情',
     tradingPanel: '交易面板',
     competition: '竞赛',
+    backtest: '回测',
     running: '运行中',
     stopped: '已停止',
     adminMode: '管理员模式',
@@ -868,6 +1019,7 @@ export const translations = {
     realtimeNav: '实时',
     configNav: '配置',
     dashboardNav: '看板',
+    strategyNav: '策略',
     faqNav: '常见问题',
 
     // Footer
@@ -930,6 +1082,174 @@ export const translations = {
     currentGap: '当前差距',
     count: '{count} 个',
 
+    // TradingView Chart
+    marketChart: '行情图表',
+    viewChart: '点击查看图表',
+    enterSymbol: '输入币种...',
+    popularSymbols: '热门币种',
+    fullscreen: '全屏',
+    exitFullscreen: '退出全屏',
+
+    // Backtest Page
+    backtestPage: {
+      title: '回测实验室',
+      subtitle: '选择模型与时间范围，快速复盘 AI 决策链路。',
+      start: '启动回测',
+      starting: '启动中...',
+      quickRanges: {
+        h24: '24小时',
+        d3: '3天',
+        d7: '7天',
+      },
+      actions: {
+        pause: '暂停',
+        resume: '恢复',
+        stop: '停止',
+      },
+      states: {
+        running: '运行中',
+        paused: '已暂停',
+        completed: '已完成',
+        failed: '失败',
+        liquidated: '已爆仓',
+      },
+      form: {
+        aiModelLabel: 'AI 模型',
+        selectAiModel: '选择AI模型',
+        providerLabel: 'Provider',
+        statusLabel: '状态',
+        enabled: '已启用',
+        disabled: '未启用',
+        noModelWarning: '请先在「模型配置」页面添加并启用AI模型。',
+        runIdLabel: 'Run ID',
+        runIdPlaceholder: '留空则自动生成',
+        decisionTfLabel: '决策周期',
+        cadenceLabel: '决策节奏（根数）',
+        timeRangeLabel: '时间范围',
+        symbolsLabel: '交易标的（逗号分隔）',
+        customTfPlaceholder: '自定义周期（逗号分隔，例如 2h,6h）',
+        initialBalanceLabel: '初始资金 (USDT)',
+        feeLabel: '手续费 (bps)',
+      slippageLabel: '滑点 (bps)',
+      btcEthLeverageLabel: 'BTC/ETH 杠杆 (倍)',
+      altcoinLeverageLabel: '山寨币杠杆 (倍)',
+      fillPolicies: {
+        nextOpen: '下一根开盘价',
+        barVwap: 'K线 VWAP',
+        midPrice: '中间价',
+        },
+        promptPresets: {
+          baseline: '基础版',
+          aggressive: '激进版',
+          conservative: '稳健版',
+          scalping: '剥头皮',
+        },
+        cacheAiLabel: '复用AI缓存',
+        replayOnlyLabel: '仅回放记录',
+        overridePromptLabel: '仅使用自定义提示词',
+        customPromptLabel: '自定义提示词（可选）',
+        customPromptPlaceholder: '追加或完全自定义策略提示词',
+      },
+      runList: {
+        title: '运行列表',
+        count: '共 {count} 条记录',
+      },
+      filters: {
+        allStates: '全部状态',
+        searchPlaceholder: 'Run ID / 标签',
+      },
+      tableHeaders: {
+        runId: 'Run ID',
+        label: '标签',
+        state: '状态',
+        progress: '进度',
+        equity: '净值',
+        lastError: '最后错误',
+        updated: '更新时间',
+      },
+      emptyStates: {
+        noRuns: '暂无记录',
+        selectRun: '请选择一个运行查看详情',
+      },
+      detail: {
+        tfAndSymbols: '周期: {tf} · 币种 {count}',
+        labelPlaceholder: '备注标签',
+        saveLabel: '保存',
+        deleteLabel: '删除',
+        exportLabel: '导出',
+        errorLabel: '错误',
+      },
+      toasts: {
+        selectModel: '请先选择一个AI模型。',
+        modelDisabled: 'AI模型 {name} 尚未启用。',
+        invalidRange: '结束时间必须晚于开始时间。',
+        startSuccess: '回测 {id} 已启动。',
+        startFailed: '启动失败，请稍后再试。',
+        actionSuccess: '{action} {id} 成功。',
+        actionFailed: '操作失败，请稍后再试。',
+        labelSaved: '标签已更新。',
+        labelFailed: '更新标签失败。',
+        confirmDelete: '确认删除回测 {id} 吗？该操作不可恢复。',
+        deleteSuccess: '回测记录已删除。',
+        deleteFailed: '删除失败，请稍后再试。',
+        traceFailed: '获取AI思维链失败。',
+        exportSuccess: '已导出 {id} 的数据。',
+        exportFailed: '导出失败。',
+      },
+      aiTrace: {
+        title: 'AI 思维链',
+        clear: '清除',
+        cyclePlaceholder: '循环编号',
+        fetch: '获取',
+        prompt: '提示词',
+        cot: '思考链',
+        output: '输出',
+        cycleTag: '周期 #{cycle}',
+      },
+      decisionTrail: {
+        title: 'AI 决策轨迹',
+        subtitle: '展示最近 {count} 次循环',
+        empty: '暂无记录',
+        emptyHint: '回测运行后将自动记录每次 AI 思考与执行',
+      },
+      charts: {
+        equityTitle: '净值曲线',
+        equityEmpty: '暂无数据',
+      },
+      metrics: {
+        title: '指标',
+        totalReturn: '总收益率 %',
+        maxDrawdown: '最大回撤 %',
+        sharpe: '夏普比率',
+        profitFactor: '盈亏因子',
+        pending: '计算中...',
+        realized: '已实现盈亏',
+        unrealized: '未实现盈亏',
+      },
+      trades: {
+        title: '交易事件',
+        headers: {
+          time: '时间',
+          symbol: '币种',
+          action: '操作',
+          qty: '数量',
+          leverage: '杠杆',
+          pnl: '盈亏',
+        },
+        empty: '暂无交易',
+      },
+      metadata: {
+        title: '元信息',
+        created: '创建时间',
+        updated: '更新时间',
+        processedBars: '已处理K线',
+        maxDrawdown: '最大回撤',
+        liquidated: '是否爆仓',
+        yes: '是',
+        no: '否',
+      },
+    },
+
     // Competition Page
     aiCompetition: 'AI竞赛',
     traders: '交易员',
@@ -948,40 +1268,6 @@ export const translations = {
     equity: '权益',
     pnl: '收益',
     pos: '持仓',
-
-    // AI Learning
-    aiLearning: 'AI学习与反思',
-    tradesAnalyzed: '已分析 {count} 笔交易 · 实时演化',
-    latestReflection: '最新反思',
-    fullCoT: '📋 完整思维链',
-    totalTrades: '总交易数',
-    winRate: '胜率',
-    avgWin: '平均盈利',
-    avgLoss: '平均亏损',
-    profitFactor: '盈亏比',
-    avgWinDivLoss: '平均盈利 ÷ 平均亏损',
-    excellent: '🔥 优秀 - 盈利能力强',
-    good: '✓ 良好 - 稳定盈利',
-    fair: '⚠️ 一般 - 需要优化',
-    poor: '❌ 较差 - 亏损超过盈利',
-    bestPerformer: '最佳表现',
-    worstPerformer: '最差表现',
-    symbolPerformance: '📊 币种表现',
-    tradeHistory: '历史成交',
-    completedTrades: '最近 {count} 笔已完成交易',
-    noCompletedTrades: '暂无完成的交易',
-    completedTradesWillAppear: '已完成的交易将显示在这里',
-    entry: '入场',
-    exit: '出场',
-    stopLoss: '止损',
-    latest: '最新',
-
-    // AI Learning Description
-    howAILearns: '💡 AI如何学习和进化',
-    aiLearningPoint1: '每次决策前分析最近20个交易周期',
-    aiLearningPoint2: '识别表现最好和最差的币种',
-    aiLearningPoint3: '根据胜率优化仓位大小',
-    aiLearningPoint4: '避免重复过去的错误',
 
     // AI Traders Management
     manageAITraders: '管理您的AI交易机器人',
@@ -1067,6 +1353,21 @@ export const translations = {
       'API 钱包私钥 - 从 https://www.asterdex.com/zh-CN/api-wallet 获取（仅在本地用于签名，不会被传输）',
     asterUsdtWarning:
       '重要提示：Aster 仅统计 USDT 余额。请确保您使用 USDT 作为保证金币种，避免其他资产（BNB、ETH等）的价格波动导致盈亏统计错误',
+
+    // LIGHTER 配置
+    lighterWalletAddress: 'L1 錢包地址',
+    lighterPrivateKey: 'L1 私鑰',
+    lighterApiKeyPrivateKey: 'API Key 私鑰',
+    enterLighterWalletAddress: '請輸入以太坊錢包地址（0x...）',
+    enterLighterPrivateKey: '請輸入 L1 私鑰（32 字節）',
+    enterLighterApiKeyPrivateKey: '請輸入 API Key 私鑰（40 字節，可選）',
+    lighterWalletAddressDesc: '您的以太坊錢包地址，用於識別賬戶',
+    lighterPrivateKeyDesc: 'L1 私鑰用於賬戶識別（32 字節 ECDSA 私鑰）',
+    lighterApiKeyPrivateKeyDesc: 'API Key 私鑰用於簽名交易（40 字節 Poseidon2 私鑰）',
+    lighterApiKeyOptionalNote: '如果不提供 API Key，系統將使用功能受限的 V1 模式',
+    lighterV1Description: '基本模式 - 功能受限，僅用於測試框架',
+    lighterV2Description: '完整模式 - 支持 Poseidon2 簽名和真實交易',
+    lighterPrivateKeyImported: 'LIGHTER 私鑰已導入',
 
     // Exchange names
     hyperliquidExchangeName: 'Hyperliquid',
@@ -1158,8 +1459,6 @@ export const translations = {
 
     // Loading & Error
     loading: '加载中...',
-    loadingError: '⚠️ 加载AI学习数据失败',
-    noCompleteData: '暂无完整交易数据（需要完成开仓→平仓的完整周期）',
 
     // AI Traders Page - Additional
     inUse: '正在使用',
@@ -1573,7 +1872,7 @@ export const translations = {
     // Data & Privacy
     faqDataStorage: '我的数据存储在哪里？',
     faqDataStorageAnswer:
-      '所有数据都本地存储在您的机器上，使用 SQLite 数据库：config.db（交易员配置）、trading.db（交易历史）、decision_logs/（AI 决策记录）。',
+      '所有数据都本地存储在您的机器上，使用 SQLite 数据库：data.db（所有配置和交易历史）、decision_logs/（AI 决策记录）。',
 
     faqApiKeySecurity: 'API 密钥安全吗？',
     faqApiKeySecurityAnswer:

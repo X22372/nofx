@@ -47,6 +47,61 @@ const HyperliquidIcon: React.FC<IconProps> = ({
   </svg>
 )
 
+// Bybit SVG 图标组件
+const BybitIcon: React.FC<IconProps> = ({
+  width = 24,
+  height = 24,
+  className,
+}) => (
+  <svg
+    width={width}
+    height={height}
+    viewBox="0 0 200 200"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+  >
+    <path
+      d="M50.5 53.3H75.5L100 77.8V122.2L75.5 146.7H50.5V53.3Z"
+      fill="#F7A600"
+    />
+    <path
+      d="M149.5 53.3H124.5L100 77.8V122.2L124.5 146.7H149.5V53.3Z"
+      fill="#F7A600"
+    />
+    <path
+      d="M75.5 53.3H124.5V77.8H75.5V53.3Z"
+      fill="#F7A600"
+    />
+    <path
+      d="M75.5 122.2H124.5V146.7H75.5V122.2Z"
+      fill="#F7A600"
+    />
+  </svg>
+)
+
+// OKX SVG 图标组件
+const OKXIcon: React.FC<IconProps> = ({
+  width = 24,
+  height = 24,
+  className,
+}) => (
+  <svg
+    width={width}
+    height={height}
+    viewBox="0 0 200 200"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+  >
+    <rect width="200" height="200" rx="24" fill="#000"/>
+    <rect x="40" y="40" width="50" height="50" rx="8" fill="#fff"/>
+    <rect x="110" y="40" width="50" height="50" rx="8" fill="#fff"/>
+    <rect x="40" y="110" width="50" height="50" rx="8" fill="#fff"/>
+    <rect x="110" y="110" width="50" height="50" rx="8" fill="#fff"/>
+  </svg>
+)
+
 // Aster SVG 图标组件
 const AsterIcon: React.FC<IconProps> = ({
   width = 24,
@@ -133,11 +188,15 @@ export const getExchangeIcon = (
   // 支持完整ID或类型名
   const type = exchangeType.toLowerCase().includes('binance')
     ? 'binance'
-    : exchangeType.toLowerCase().includes('hyperliquid')
-      ? 'hyperliquid'
-      : exchangeType.toLowerCase().includes('aster')
-        ? 'aster'
-        : exchangeType.toLowerCase()
+    : exchangeType.toLowerCase().includes('bybit')
+      ? 'bybit'
+      : exchangeType.toLowerCase().includes('okx')
+        ? 'okx'
+        : exchangeType.toLowerCase().includes('hyperliquid')
+          ? 'hyperliquid'
+          : exchangeType.toLowerCase().includes('aster')
+            ? 'aster'
+            : exchangeType.toLowerCase()
 
   const iconProps = {
     width: props.width || 24,
@@ -147,13 +206,17 @@ export const getExchangeIcon = (
 
   switch (type) {
     case 'binance':
-    case 'cex':
       return <BinanceIcon {...iconProps} />
+    case 'bybit':
+      return <BybitIcon {...iconProps} />
+    case 'okx':
+      return <OKXIcon {...iconProps} />
     case 'hyperliquid':
     case 'dex':
       return <HyperliquidIcon {...iconProps} />
     case 'aster':
       return <AsterIcon {...iconProps} />
+    case 'cex':
     default:
       return (
         <div

@@ -21,15 +21,10 @@ interface UseTraderActionsParams {
   mutateTraders: () => Promise<any>
   setAllModels: (models: AIModel[]) => void
   setAllExchanges: (exchanges: Exchange[]) => void
-  setUserSignalSource: (config: {
-    coinPoolUrl: string
-    oiTopUrl: string
-  }) => void
   setShowCreateModal: (show: boolean) => void
   setShowEditModal: (show: boolean) => void
   setShowModelModal: (show: boolean) => void
   setShowExchangeModal: (show: boolean) => void
-  setShowSignalSourceModal: (show: boolean) => void
   setEditingModel: (modelId: string | null) => void
   setEditingExchange: (exchangeId: string | null) => void
   editingTrader: TraderConfigData | null
@@ -46,12 +41,10 @@ export function useTraderActions({
   mutateTraders,
   setAllModels,
   setAllExchanges,
-  setUserSignalSource,
   setShowCreateModal,
   setShowEditModal,
   setShowModelModal,
   setShowExchangeModal,
-  setShowSignalSourceModal,
   setEditingModel,
   setEditingExchange,
   editingTrader,
@@ -452,6 +445,7 @@ export function useTraderActions({
         ...e,
         apiKey: '',
         secretKey: '',
+        passphrase: '', // OKX专用
         hyperliquidWalletAddr: '',
         asterUser: '',
         asterSigner: '',
@@ -466,6 +460,7 @@ export function useTraderActions({
               enabled: exchange.enabled,
               api_key: exchange.apiKey || '',
               secret_key: exchange.secretKey || '',
+              passphrase: exchange.passphrase || '', // OKX专用
               testnet: exchange.testnet || false,
               hyperliquid_wallet_addr: exchange.hyperliquidWalletAddr || '',
               aster_user: exchange.asterUser || '',
@@ -493,11 +488,15 @@ export function useTraderActions({
     exchangeId: string,
     apiKey: string,
     secretKey?: string,
+    passphrase?: string, // OKX专用
     testnet?: boolean,
     hyperliquidWalletAddr?: string,
     asterUser?: string,
     asterSigner?: string,
-    asterPrivateKey?: string
+    asterPrivateKey?: string,
+    lighterWalletAddr?: string,
+    lighterPrivateKey?: string,
+    lighterApiKeyPrivateKey?: string
   ) => {
     try {
       // 找到要配置的交易所(从supportedExchanges中)
@@ -522,11 +521,15 @@ export function useTraderActions({
                   ...e,
                   apiKey,
                   secretKey,
+                  passphrase, // OKX专用
                   testnet,
                   hyperliquidWalletAddr,
                   asterUser,
                   asterSigner,
                   asterPrivateKey,
+                  lighterWalletAddr,
+                  lighterPrivateKey,
+                  lighterApiKeyPrivateKey,
                   enabled: true,
                 }
               : e
@@ -537,11 +540,15 @@ export function useTraderActions({
           ...exchangeToUpdate,
           apiKey,
           secretKey,
+          passphrase, // OKX专用
           testnet,
           hyperliquidWalletAddr,
           asterUser,
           asterSigner,
           asterPrivateKey,
+          lighterWalletAddr,
+          lighterPrivateKey,
+          lighterApiKeyPrivateKey,
           enabled: true,
         }
         updatedExchanges = [...(allExchanges || []), newExchange]
@@ -555,11 +562,15 @@ export function useTraderActions({
               enabled: exchange.enabled,
               api_key: exchange.apiKey || '',
               secret_key: exchange.secretKey || '',
+              passphrase: exchange.passphrase || '', // OKX专用
               testnet: exchange.testnet || false,
               hyperliquid_wallet_addr: exchange.hyperliquidWalletAddr || '',
               aster_user: exchange.asterUser || '',
               aster_signer: exchange.asterSigner || '',
               aster_private_key: exchange.asterPrivateKey || '',
+              lighter_wallet_addr: exchange.lighterWalletAddr || '',
+              lighter_private_key: exchange.lighterPrivateKey || '',
+              lighter_api_key_private_key: exchange.lighterApiKeyPrivateKey || '',
             },
           ])
         ),
@@ -593,24 +604,6 @@ export function useTraderActions({
     setShowExchangeModal(true)
   }
 
-  const handleSaveSignalSource = async (
-    coinPoolUrl: string,
-    oiTopUrl: string
-  ) => {
-    try {
-      await toast.promise(api.saveUserSignalSource(coinPoolUrl, oiTopUrl), {
-        loading: '正在保存…',
-        success: '保存成功',
-        error: '保存失败',
-      })
-      setUserSignalSource({ coinPoolUrl, oiTopUrl })
-      setShowSignalSourceModal(false)
-    } catch (error) {
-      console.error('Failed to save signal source:', error)
-      toast.error(t('saveSignalSourceFailed', language))
-    }
-  }
-
   return {
     // 辅助函数
     isModelInUse,
@@ -634,6 +627,5 @@ export function useTraderActions({
     handleDeleteModel,
     handleSaveExchange,
     handleDeleteExchange,
-    handleSaveSignalSource,
   }
 }
