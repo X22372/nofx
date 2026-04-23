@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"nofx/decision"
+	"nofx/kernel"
+	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
+	_ "nofx/mcp/payment"
+	_ "nofx/mcp/provider"
 	"nofx/store"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,14 +21,65 @@ import (
 func validateStrategyConfig(config *store.StrategyConfig) []string {
 	var warnings []string
 
-	// Validate quant data URL if enabled
-	if config.Indicators.EnableQuantData && config.Indicators.QuantDataAPIURL != "" {
-		if !strings.Contains(config.Indicators.QuantDataAPIURL, "{symbol}") {
-			warnings = append(warnings, "Quant data URL does not contain {symbol} placeholder. The same data will be used for all coins, which may not be correct.")
-		}
+	// Validate NofxOS API key if any NofxOS feature is enabled
+	if (config.Indicators.EnableQuantData || config.Indicators.EnableOIRanking ||
+		config.Indicators.EnableNetFlowRanking || config.Indicators.EnablePriceRanking) &&
+		config.Indicators.NofxOSAPIKey == "" {
+		warnings = append(warnings, "NofxOS API key is not configured. NofxOS data sources may not work properly.")
 	}
 
 	return warnings
+}
+
+// handleEstimateTokens estimates token usage for a strategy config (no auth required, pure computation)
+func (s *Server) handleEstimateTokens(c *gin.Context) {
+	var req struct {
+		Config store.StrategyConfig `json:"config" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request parameters")
+		return
+	}
+
+	estimate := req.Config.EstimateTokens()
+	c.JSON(http.StatusOK, estimate)
+}
+
+// handlePublicStrategies Get public strategies for strategy market (no auth required)
+func (s *Server) handlePublicStrategies(c *gin.Context) {
+	strategies, err := s.store.Strategy().ListPublic()
+	if err != nil {
+		SafeInternalError(c, "Failed to get public strategies", err)
+		return
+	}
+
+	// Convert to frontend format with visibility control
+	result := make([]gin.H, 0, len(strategies))
+	for _, st := range strategies {
+		item := gin.H{
+			"id":             st.ID,
+			"name":           st.Name,
+			"description":    st.Description,
+			"author_email":   "", // Will be filled if we have user info
+			"is_public":      st.IsPublic,
+			"config_visible": st.ConfigVisible,
+			"created_at":     st.CreatedAt,
+			"updated_at":     st.UpdatedAt,
+		}
+
+		// Only include config if config_visible is true
+		if st.ConfigVisible {
+			var config store.StrategyConfig
+			json.Unmarshal([]byte(st.Config), &config)
+			item["config"] = config
+		}
+
+		result = append(result, item)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"strategies": result,
+	})
 }
 
 // handleGetStrategies Get strategy list
@@ -39,7 +92,7 @@ func (s *Server) handleGetStrategies(c *gin.Context) {
 
 	strategies, err := s.store.Strategy().List(userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get strategy list: " + err.Error()})
+		SafeInternalError(c, "Failed to get strategy list", err)
 		return
 	}
 
@@ -50,14 +103,16 @@ func (s *Server) handleGetStrategies(c *gin.Context) {
 		json.Unmarshal([]byte(st.Config), &config)
 
 		result = append(result, gin.H{
-			"id":          st.ID,
-			"name":        st.Name,
-			"description": st.Description,
-			"is_active":   st.IsActive,
-			"is_default":  st.IsDefault,
-			"config":      config,
-			"created_at":  st.CreatedAt,
-			"updated_at":  st.UpdatedAt,
+			"id":             st.ID,
+			"name":           st.Name,
+			"description":    st.Description,
+			"is_active":      st.IsActive,
+			"is_default":     st.IsDefault,
+			"is_public":      st.IsPublic,
+			"config_visible": st.ConfigVisible,
+			"config":         config,
+			"created_at":     st.CreatedAt,
+			"updated_at":     st.UpdatedAt,
 		})
 	}
 
@@ -97,7 +152,8 @@ func (s *Server) handleGetStrategy(c *gin.Context) {
 	})
 }
 
-// handleCreateStrategy Create strategy
+// handleCreateStrategy Create strategy.
+// If "config" is omitted from the request body, the system default config is used automatically.
 func (s *Server) handleCreateStrategy(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
@@ -106,20 +162,31 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 	}
 
 	var req struct {
-		Name        string               `json:"name" binding:"required"`
-		Description string               `json:"description"`
-		Config      store.StrategyConfig `json:"config" binding:"required"`
+		Name        string                `json:"name" binding:"required"`
+		Description string                `json:"description"`
+		Lang        string                `json:"lang"`   // "zh" or "en", used when config is omitted
+		Config      *store.StrategyConfig `json:"config"` // optional — uses default if omitted
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		SafeBadRequest(c, "Invalid request parameters")
 		return
+	}
+
+	// Use default config when none provided
+	if req.Config == nil {
+		lang := req.Lang
+		if lang == "" {
+			lang = "zh"
+		}
+		defaultCfg := store.GetDefaultStrategyConfig(lang)
+		req.Config = &defaultCfg
 	}
 
 	// Serialize configuration
 	configJSON, err := json.Marshal(req.Config)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to serialize configuration"})
+		SafeInternalError(c, "Serialize configuration", err)
 		return
 	}
 
@@ -134,12 +201,12 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 	}
 
 	if err := s.store.Strategy().Create(strategy); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create strategy: " + err.Error()})
+		SafeInternalError(c, "Failed to create strategy", err)
 		return
 	}
 
 	// Validate configuration and collect warnings
-	warnings := validateStrategyConfig(&req.Config)
+	warnings := validateStrategyConfig(req.Config)
 
 	response := gin.H{
 		"id":      strategy.ID,
@@ -152,7 +219,10 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// handleUpdateStrategy Update strategy
+// handleUpdateStrategy Update strategy.
+// The incoming config is merged with the existing one: top-level sections present in the
+// request overwrite the corresponding existing sections; absent sections are preserved.
+// This prevents partial updates from zeroing out unmentioned fields.
 func (s *Server) handleUpdateStrategy(c *gin.Context) {
 	userID := c.GetString("user_id")
 	strategyID := c.Param("id")
@@ -174,38 +244,86 @@ func (s *Server) handleUpdateStrategy(c *gin.Context) {
 	}
 
 	var req struct {
-		Name        string               `json:"name"`
-		Description string               `json:"description"`
-		Config      store.StrategyConfig `json:"config"`
+		Name          string          `json:"name"`
+		Description   string          `json:"description"`
+		Config        json.RawMessage `json:"config"` // raw JSON so we can merge
+		IsPublic      bool            `json:"is_public"`
+		ConfigVisible bool            `json:"config_visible"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
 
-	// Serialize configuration
-	configJSON, err := json.Marshal(req.Config)
+	// Start with the existing config as base — preserves all unmentioned fields.
+	var mergedConfig store.StrategyConfig
+	if err := json.Unmarshal([]byte(existing.Config), &mergedConfig); err != nil {
+		// If existing config is corrupt, start from zero
+		mergedConfig = store.StrategyConfig{}
+	}
+
+	// Apply incoming config on top: top-level sections present in the request overwrite
+	// their corresponding existing section; absent sections remain unchanged.
+	if len(req.Config) > 0 && string(req.Config) != "null" {
+		if err := json.Unmarshal(req.Config, &mergedConfig); err != nil {
+			SafeBadRequest(c, "Invalid config JSON")
+			return
+		}
+	}
+
+	// Preserve existing name/description when not supplied
+	name := req.Name
+	if name == "" {
+		name = existing.Name
+	}
+	description := req.Description
+	if description == "" {
+		description = existing.Description
+	}
+
+	configJSON, err := json.Marshal(mergedConfig)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to serialize configuration"})
+		SafeInternalError(c, "Serialize configuration", err)
 		return
 	}
 
 	strategy := &store.Strategy{
-		ID:          strategyID,
-		UserID:      userID,
-		Name:        req.Name,
-		Description: req.Description,
-		Config:      string(configJSON),
+		ID:            strategyID,
+		UserID:        userID,
+		Name:          name,
+		Description:   description,
+		Config:        string(configJSON),
+		IsPublic:      req.IsPublic,
+		ConfigVisible: req.ConfigVisible,
 	}
 
 	if err := s.store.Strategy().Update(strategy); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update strategy: " + err.Error()})
+		SafeInternalError(c, "Failed to update strategy", err)
 		return
 	}
 
-	// Validate configuration and collect warnings
-	warnings := validateStrategyConfig(&req.Config)
+	// Token overflow check — block save if all models exceed context limits
+	if mergedConfig.StrategyType == "" || mergedConfig.StrategyType == "ai_trading" {
+		estimate := mergedConfig.EstimateTokens()
+		allExceed := true
+		for _, ml := range estimate.ModelLimits {
+			if ml.UsagePct <= 100 {
+				allExceed = false
+				break
+			}
+		}
+		if allExceed && len(estimate.ModelLimits) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":          fmt.Sprintf("Estimated %d tokens exceeds all known model context limits. Reduce coins, timeframes, or K-line count.", estimate.Total),
+				"token_estimate": estimate,
+			})
+			return
+		}
+	}
+
+	// Validate merged configuration and collect warnings
+	warnings := validateStrategyConfig(&mergedConfig)
 
 	response := gin.H{"message": "Strategy updated successfully"}
 	if len(warnings) > 0 {
@@ -226,7 +344,7 @@ func (s *Server) handleDeleteStrategy(c *gin.Context) {
 	}
 
 	if err := s.store.Strategy().Delete(userID, strategyID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete strategy: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": SanitizeError(err, "Failed to delete strategy")})
 		return
 	}
 
@@ -244,7 +362,7 @@ func (s *Server) handleActivateStrategy(c *gin.Context) {
 	}
 
 	if err := s.store.Strategy().SetActive(userID, strategyID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to activate strategy: " + err.Error()})
+		SafeInternalError(c, "Failed to activate strategy", err)
 		return
 	}
 
@@ -266,13 +384,13 @@ func (s *Server) handleDuplicateStrategy(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
 
 	newID := uuid.New().String()
 	if err := s.store.Strategy().Duplicate(userID, sourceID, newID, req.Name); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to duplicate strategy: " + err.Error()})
+		SafeInternalError(c, "Failed to duplicate strategy", err)
 		return
 	}
 
@@ -334,13 +452,13 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	}
 
 	var req struct {
-		Config          store.StrategyConfig `json:"config" binding:"required"`
-		AccountEquity   float64              `json:"account_equity"`
-		PromptVariant   string               `json:"prompt_variant"`
+		Config        store.StrategyConfig `json:"config" binding:"required"`
+		AccountEquity float64              `json:"account_equity"`
+		PromptVariant string               `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
 
@@ -353,7 +471,7 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	}
 
 	// Create strategy engine to build prompt
-	engine := decision.NewStrategyEngine(&req.Config)
+	engine := kernel.NewStrategyEngine(&req.Config)
 
 	// Build system prompt (using built-in method from strategy engine)
 	systemPrompt := engine.BuildSystemPrompt(
@@ -361,13 +479,9 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 		req.PromptVariant,
 	)
 
-	// Get list of available prompt templates
-	templateNames := decision.GetAllPromptTemplateNames()
-
 	c.JSON(http.StatusOK, gin.H{
-		"system_prompt":       systemPrompt,
-		"prompt_variant":      req.PromptVariant,
-		"available_templates": templateNames,
+		"system_prompt":  systemPrompt,
+		"prompt_variant": req.PromptVariant,
 		"config_summary": gin.H{
 			"coin_source":      req.Config.CoinSource.SourceType,
 			"primary_tf":       req.Config.Indicators.Klines.PrimaryTimeframe,
@@ -394,7 +508,7 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
 
@@ -402,14 +516,24 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 		req.PromptVariant = "balanced"
 	}
 
+	claw402WalletKey, err := s.resolveStrategyDataWalletKey(userID, req.AIModelID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":       err.Error(),
+			"ai_response": "",
+		})
+		return
+	}
+
 	// Create strategy engine to build prompt
-	engine := decision.NewStrategyEngine(&req.Config)
+	engine := kernel.NewStrategyEngine(&req.Config, claw402WalletKey)
 
 	// Get candidate coins
 	candidates, err := engine.GetCandidateCoins()
 	if err != nil {
+		logger.Errorf("[API Error] Failed to get candidate coins: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":       "Failed to get candidate coins: " + err.Error(),
+			"error":       "Failed to get candidate coins",
 			"ai_response": "",
 		})
 		return
@@ -453,12 +577,28 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 		marketDataMap[coin.Symbol] = data
 	}
 
+	// Fetch quantitative data for each candidate coin
+	symbols := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		symbols = append(symbols, c.Symbol)
+	}
+	quantDataMap := engine.FetchQuantDataBatch(symbols)
+
+	// Fetch OI ranking data (market-wide position changes)
+	oiRankingData := engine.FetchOIRankingData()
+
+	// Fetch NetFlow ranking data (market-wide fund flow)
+	netFlowRankingData := engine.FetchNetFlowRankingData()
+
+	// Fetch Price ranking data (market-wide gainers/losers)
+	priceRankingData := engine.FetchPriceRankingData()
+
 	// Build real context (for generating User Prompt)
-	testContext := &decision.Context{
-		CurrentTime:    time.Now().Format("2006-01-02 15:04:05"),
+	testContext := &kernel.Context{
+		CurrentTime:    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		RuntimeMinutes: 0,
 		CallCount:      1,
-		Account: decision.AccountInfo{
+		Account: kernel.AccountInfo{
 			TotalEquity:      1000.0,
 			AvailableBalance: 1000.0,
 			UnrealizedPnL:    0,
@@ -468,10 +608,14 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 			MarginUsedPct:    0,
 			PositionCount:    0,
 		},
-		Positions:      []decision.PositionInfo{},
-		CandidateCoins: candidates,
-		PromptVariant:  req.PromptVariant,
-		MarketDataMap:  marketDataMap,
+		Positions:          []kernel.PositionInfo{},
+		CandidateCoins:     candidates,
+		PromptVariant:      req.PromptVariant,
+		MarketDataMap:      marketDataMap,
+		QuantDataMap:       quantDataMap,
+		OIRankingData:      oiRankingData,
+		NetFlowRankingData: netFlowRankingData,
+		PriceRankingData:   priceRankingData,
 	}
 
 	// Build System Prompt
@@ -537,21 +681,21 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 		return "", fmt.Errorf("AI model %s is missing API Key", model.Name)
 	}
 
-	// Create AI client
-	var aiClient mcp.AIClient
+	// Create AI client via registry
 	provider := model.Provider
+	apiKey := string(model.APIKey)
 
-	switch provider {
-	case "qwen":
-		aiClient = mcp.NewQwenClient()
-		aiClient.SetAPIKey(model.APIKey, model.CustomAPIURL, model.CustomModelName)
-	case "deepseek":
-		aiClient = mcp.NewDeepSeekClient()
-		aiClient.SetAPIKey(model.APIKey, model.CustomAPIURL, model.CustomModelName)
-	default:
-		// Use generic client
+	aiClient := mcp.NewAIClientByProvider(provider)
+	if aiClient == nil {
 		aiClient = mcp.NewClient()
-		aiClient.SetAPIKey(model.APIKey, model.CustomAPIURL, model.CustomModelName)
+	}
+
+	// Payment providers ignore custom URL
+	switch provider {
+	case "claw402":
+		aiClient.SetAPIKey(apiKey, "", model.CustomModelName)
+	default:
+		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
 	}
 
 	// Call AI API
@@ -563,3 +707,6 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 	return response, nil
 }
 
+func (s *Server) resolveStrategyDataWalletKey(userID, selectedModelID string) (string, error) {
+	return s.store.AIModel().ResolveClaw402WalletKey(userID, selectedModelID)
+}

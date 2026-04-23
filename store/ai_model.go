@@ -1,71 +1,52 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
+	"nofx/crypto"
 	"nofx/logger"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // AIModelStore AI model storage
 type AIModelStore struct {
-	db            *sql.DB
-	encryptFunc   func(string) string
-	decryptFunc   func(string) string
+	db *gorm.DB
 }
 
 // AIModel AI model configuration
 type AIModel struct {
-	ID              string    `json:"id"`
-	UserID          string    `json:"user_id"`
-	Name            string    `json:"name"`
-	Provider        string    `json:"provider"`
-	Enabled         bool      `json:"enabled"`
-	APIKey          string    `json:"apiKey"`
-	CustomAPIURL    string    `json:"customApiUrl"`
-	CustomModelName string    `json:"customModelName"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string          `gorm:"primaryKey" json:"id"`
+	UserID          string          `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
+	Name            string          `gorm:"not null" json:"name"`
+	Provider        string          `gorm:"not null" json:"provider"`
+	Enabled         bool            `gorm:"default:false" json:"enabled"`
+	APIKey          crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
+	CustomAPIURL    string          `gorm:"column:custom_api_url;default:''" json:"customApiUrl"`
+	CustomModelName string          `gorm:"column:custom_model_name;default:''" json:"customModelName"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
+func (AIModel) TableName() string { return "ai_models" }
+
+// NewAIModelStore creates a new AIModelStore
+func NewAIModelStore(db *gorm.DB) *AIModelStore {
+	return &AIModelStore{db: db}
 }
 
 func (s *AIModelStore) initTables() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS ai_models (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL DEFAULT 'default',
-			name TEXT NOT NULL,
-			provider TEXT NOT NULL,
-			enabled BOOLEAN DEFAULT 0,
-			api_key TEXT DEFAULT '',
-			custom_api_url TEXT DEFAULT '',
-			custom_model_name TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
+	// For PostgreSQL with existing table, skip AutoMigrate
+	if s.db.Dialector.Name() == "postgres" {
+		var tableExists int64
+		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'ai_models'`).Scan(&tableExists)
+		if tableExists > 0 {
+			return nil
+		}
 	}
-
-	// Trigger
-	_, err = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS update_ai_models_updated_at
-		AFTER UPDATE ON ai_models
-		BEGIN
-			UPDATE ai_models SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-		END
-	`)
-	if err != nil {
-		return err
-	}
-
-	// Backward compatibility: add potentially missing columns
-	s.db.Exec(`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`)
-	s.db.Exec(`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`)
-
-	return nil
+	return s.db.AutoMigrate(&AIModel{})
 }
 
 func (s *AIModelStore) initDefaultData() error {
@@ -73,50 +54,30 @@ func (s *AIModelStore) initDefaultData() error {
 	return nil
 }
 
-func (s *AIModelStore) encrypt(plaintext string) string {
-	if s.encryptFunc != nil {
-		return s.encryptFunc(plaintext)
+// FindOrphanClaw402 finds a claw402 model whose user_id no longer exists in the users table.
+// Used to recover wallets after account reset.
+func (s *AIModelStore) FindOrphanClaw402() (*AIModel, error) {
+	var model AIModel
+	err := s.db.Where("provider = ? AND api_key != '' AND user_id NOT IN (SELECT id FROM users)", "claw402").
+		First(&model).Error
+	if err != nil {
+		return nil, err
 	}
-	return plaintext
+	return &model, nil
 }
 
-func (s *AIModelStore) decrypt(encrypted string) string {
-	if s.decryptFunc != nil {
-		return s.decryptFunc(encrypted)
-	}
-	return encrypted
+// AdoptModel re-assigns an existing model to a new user.
+func (s *AIModelStore) AdoptModel(modelID, newUserID string) error {
+	return s.db.Model(&AIModel{}).Where("id = ?", modelID).
+		Update("user_id", newUserID).Error
 }
 
 // List retrieves user's AI model list
 func (s *AIModelStore) List(userID string) ([]*AIModel, error) {
-	rows, err := s.db.Query(`
-		SELECT id, user_id, name, provider, enabled, api_key,
-		       COALESCE(custom_api_url, '') as custom_api_url,
-		       COALESCE(custom_model_name, '') as custom_model_name,
-		       created_at, updated_at
-		FROM ai_models WHERE user_id = ? ORDER BY id
-	`, userID)
+	var models []*AIModel
+	err := s.db.Where("user_id = ?", userID).Order("id").Find(&models).Error
 	if err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-
-	models := make([]*AIModel, 0)
-	for rows.Next() {
-		var model AIModel
-		var createdAt, updatedAt string
-		err := rows.Scan(
-			&model.ID, &model.UserID, &model.Name, &model.Provider,
-			&model.Enabled, &model.APIKey, &model.CustomAPIURL, &model.CustomModelName,
-			&createdAt, &updatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		model.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		model.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
-		model.APIKey = s.decrypt(model.APIKey)
-		models = append(models, &model)
 	}
 	return models, nil
 }
@@ -140,27 +101,29 @@ func (s *AIModelStore) Get(userID, modelID string) (*AIModel, error) {
 
 	for _, uid := range candidates {
 		var model AIModel
-		var createdAt, updatedAt string
-		err := s.db.QueryRow(`
-			SELECT id, user_id, name, provider, enabled, api_key,
-			       COALESCE(custom_api_url, ''), COALESCE(custom_model_name, ''), created_at, updated_at
-			FROM ai_models WHERE user_id = ? AND id = ? LIMIT 1
-		`, uid, modelID).Scan(
-			&model.ID, &model.UserID, &model.Name, &model.Provider,
-			&model.Enabled, &model.APIKey, &model.CustomAPIURL, &model.CustomModelName,
-			&createdAt, &updatedAt,
-		)
+		err := s.db.Where("user_id = ? AND id = ?", uid, modelID).First(&model).Error
 		if err == nil {
-			model.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-			model.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
-			model.APIKey = s.decrypt(model.APIKey)
 			return &model, nil
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
 	}
-	return nil, sql.ErrNoRows
+	return nil, gorm.ErrRecordNotFound
+}
+
+// GetByID retrieves an AI model by ID only
+func (s *AIModelStore) GetByID(modelID string) (*AIModel, error) {
+	if modelID == "" {
+		return nil, fmt.Errorf("model ID cannot be empty")
+	}
+
+	var model AIModel
+	err := s.db.Where("id = ?", modelID).First(&model).Error
+	if err != nil {
+		return nil, err
+	}
+	return &model, nil
 }
 
 // GetDefault retrieves the default enabled AI model
@@ -172,7 +135,7 @@ func (s *AIModelStore) GetDefault(userID string) (*AIModel, error) {
 	if err == nil {
 		return model, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 	if userID != "default" {
@@ -183,23 +146,25 @@ func (s *AIModelStore) GetDefault(userID string) (*AIModel, error) {
 
 func (s *AIModelStore) firstEnabled(userID string) (*AIModel, error) {
 	var model AIModel
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, user_id, name, provider, enabled, api_key,
-		       COALESCE(custom_api_url, ''), COALESCE(custom_model_name, ''), created_at, updated_at
-		FROM ai_models WHERE user_id = ? AND enabled = 1
-		ORDER BY datetime(updated_at) DESC, id ASC LIMIT 1
-	`, userID).Scan(
-		&model.ID, &model.UserID, &model.Name, &model.Provider,
-		&model.Enabled, &model.APIKey, &model.CustomAPIURL, &model.CustomModelName,
-		&createdAt, &updatedAt,
-	)
+	err := s.db.Where("user_id = ? AND enabled = ?", userID, true).
+		Order("updated_at DESC, id ASC").
+		First(&model).Error
 	if err != nil {
 		return nil, err
 	}
-	model.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	model.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
-	model.APIKey = s.decrypt(model.APIKey)
+	return &model, nil
+}
+
+// GetAnyEnabled returns the first enabled AI model across all users.
+// Used by single-user features (e.g. Telegram bot) that need any working LLM client.
+func (s *AIModelStore) GetAnyEnabled() (*AIModel, error) {
+	var model AIModel
+	err := s.db.Where("enabled = ? AND api_key != ''", true).
+		Order("updated_at DESC, id ASC").
+		First(&model).Error
+	if err != nil {
+		return nil, err
+	}
 	return &model, nil
 }
 
@@ -207,44 +172,38 @@ func (s *AIModelStore) firstEnabled(userID string) (*AIModel, error) {
 // IMPORTANT: If apiKey is empty string, the existing API key will be preserved (not overwritten)
 func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPIURL, customModelName string) error {
 	// Try exact ID match first
-	var existingID string
-	err := s.db.QueryRow(`SELECT id FROM ai_models WHERE user_id = ? AND id = ? LIMIT 1`, userID, id).Scan(&existingID)
+	var existingModel AIModel
+	err := s.db.Where("user_id = ? AND id = ?", userID, id).First(&existingModel).Error
 	if err == nil {
-		// If apiKey is empty, preserve the existing API key
-		if apiKey == "" {
-			_, err = s.db.Exec(`
-				UPDATE ai_models SET enabled = ?, custom_api_url = ?, custom_model_name = ?, updated_at = datetime('now')
-				WHERE id = ? AND user_id = ?
-			`, enabled, customAPIURL, customModelName, existingID, userID)
-		} else {
-			encryptedAPIKey := s.encrypt(apiKey)
-			_, err = s.db.Exec(`
-				UPDATE ai_models SET enabled = ?, api_key = ?, custom_api_url = ?, custom_model_name = ?, updated_at = datetime('now')
-				WHERE id = ? AND user_id = ?
-			`, enabled, encryptedAPIKey, customAPIURL, customModelName, existingID, userID)
+		// Update existing model
+		updates := map[string]interface{}{
+			"enabled":           enabled,
+			"custom_api_url":    customAPIURL,
+			"custom_model_name": customModelName,
+			"updated_at":        time.Now().UTC(),
 		}
-		return err
+		// If apiKey is not empty, update it (encryption handled by crypto.EncryptedString)
+		if apiKey != "" {
+			updates["api_key"] = crypto.EncryptedString(apiKey)
+		}
+		return s.db.Model(&existingModel).Updates(updates).Error
 	}
 
 	// Try legacy logic compatibility: use id as provider to search
 	provider := id
-	err = s.db.QueryRow(`SELECT id FROM ai_models WHERE user_id = ? AND provider = ? LIMIT 1`, userID, provider).Scan(&existingID)
+	err = s.db.Where("user_id = ? AND provider = ?", userID, provider).First(&existingModel).Error
 	if err == nil {
-		logger.Warnf("⚠️ Using legacy provider matching to update model: %s -> %s", provider, existingID)
-		// If apiKey is empty, preserve the existing API key
-		if apiKey == "" {
-			_, err = s.db.Exec(`
-				UPDATE ai_models SET enabled = ?, custom_api_url = ?, custom_model_name = ?, updated_at = datetime('now')
-				WHERE id = ? AND user_id = ?
-			`, enabled, customAPIURL, customModelName, existingID, userID)
-		} else {
-			encryptedAPIKey := s.encrypt(apiKey)
-			_, err = s.db.Exec(`
-				UPDATE ai_models SET enabled = ?, api_key = ?, custom_api_url = ?, custom_model_name = ?, updated_at = datetime('now')
-				WHERE id = ? AND user_id = ?
-			`, enabled, encryptedAPIKey, customAPIURL, customModelName, existingID, userID)
+		logger.Warnf("⚠️ Using legacy provider matching to update model: %s -> %s", provider, existingModel.ID)
+		updates := map[string]interface{}{
+			"enabled":           enabled,
+			"custom_api_url":    customAPIURL,
+			"custom_model_name": customModelName,
+			"updated_at":        time.Now().UTC(),
 		}
-		return err
+		if apiKey != "" {
+			updates["api_key"] = crypto.EncryptedString(apiKey)
+		}
+		return s.db.Model(&existingModel).Updates(updates).Error
 	}
 
 	// Create new record
@@ -259,9 +218,12 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 		}
 	}
 
+	// Try to get name from existing model with same provider
+	var refModel AIModel
 	var name string
-	err = s.db.QueryRow(`SELECT name FROM ai_models WHERE provider = ? LIMIT 1`, provider).Scan(&name)
-	if err != nil {
+	if err := s.db.Where("provider = ?", provider).First(&refModel).Error; err == nil {
+		name = refModel.Name
+	} else {
 		if provider == "deepseek" {
 			name = "DeepSeek AI"
 		} else if provider == "qwen" {
@@ -277,19 +239,67 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 	}
 
 	logger.Infof("✓ Creating new AI model configuration: ID=%s, Provider=%s, Name=%s", newModelID, provider, name)
-	encryptedAPIKey := s.encrypt(apiKey)
-	_, err = s.db.Exec(`
-		INSERT INTO ai_models (id, user_id, name, provider, enabled, api_key, custom_api_url, custom_model_name, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-	`, newModelID, userID, name, provider, enabled, encryptedAPIKey, customAPIURL, customModelName)
-	return err
+	newModel := &AIModel{
+		ID:              newModelID,
+		UserID:          userID,
+		Name:            name,
+		Provider:        provider,
+		Enabled:         enabled,
+		APIKey:          crypto.EncryptedString(apiKey),
+		CustomAPIURL:    customAPIURL,
+		CustomModelName: customModelName,
+	}
+	return s.db.Create(newModel).Error
 }
 
 // Create creates an AI model
+// ResolveClaw402WalletKey returns the claw402 wallet private key for a user.
+// If preferredModelID is non-empty and points to a claw402 model, its key is returned first.
+// Otherwise the first enabled claw402 model in the user's model list is used.
+// Returns ("", nil) when no claw402 model is configured — callers should treat this as
+// "no paid data routing" rather than an error.
+func (s *AIModelStore) ResolveClaw402WalletKey(userID, preferredModelID string) (string, error) {
+	if preferredModelID != "" {
+		model, err := s.Get(userID, preferredModelID)
+		if err != nil {
+			return "", fmt.Errorf("failed to load selected AI model")
+		}
+		if model.Provider == "claw402" {
+			walletKey := string(model.APIKey)
+			if walletKey == "" {
+				return "", fmt.Errorf("selected claw402 model is missing wallet private key")
+			}
+			return walletKey, nil
+		}
+	}
+
+	models, err := s.List(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to load AI models")
+	}
+
+	for _, model := range models {
+		if model == nil || model.Provider != "claw402" {
+			continue
+		}
+		if walletKey := string(model.APIKey); walletKey != "" {
+			return walletKey, nil
+		}
+	}
+
+	return "", nil
+}
+
 func (s *AIModelStore) Create(userID, id, name, provider string, enabled bool, apiKey, customAPIURL string) error {
-	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO ai_models (id, user_id, name, provider, enabled, api_key, custom_api_url)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, id, userID, name, provider, enabled, apiKey, customAPIURL)
-	return err
+	model := &AIModel{
+		ID:           id,
+		UserID:       userID,
+		Name:         name,
+		Provider:     provider,
+		Enabled:      enabled,
+		APIKey:       crypto.EncryptedString(apiKey),
+		CustomAPIURL: customAPIURL,
+	}
+	// Use FirstOrCreate to ignore if already exists
+	return s.db.Where("id = ?", id).FirstOrCreate(model).Error
 }

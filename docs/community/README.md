@@ -28,14 +28,14 @@ We're introducing a new PR management system to improve code quality and make co
    - [Security Policy](../../SECURITY.md) - Report vulnerabilities
 
 2. **Find Something to Work On**
-   - Browse [GitHub Issues](https://github.com/tinkle-community/nofx/issues)
+   - Browse [GitHub Issues](https://github.com/NoFxAiOS/nofx/issues)
    - Look for `good first issue` label
    - Check out [bounty tasks](#-bounty-program)
 
 3. **Join the Community**
    - 💬 [Telegram Developer Community](https://t.me/nofx_dev_community)
    - 🐦 [Twitter @nofx_official](https://x.com/nofx_official)
-   - 🐙 [GitHub Discussions](https://github.com/tinkle-community/nofx/discussions)
+   - 🐙 [GitHub Discussions](https://github.com/NoFxAiOS/nofx/discussions)
 
 ---
 
@@ -139,7 +139,7 @@ NOFX offers bounties for valuable contributions:
 | Platform | Purpose | Link |
 |----------|---------|------|
 | 💬 Telegram | Real-time chat, questions | [Join](https://t.me/nofx_dev_community) |
-| 🐙 GitHub | Issues, PRs, discussions | [Visit](https://github.com/tinkle-community/nofx) |
+| 🐙 GitHub | Issues, PRs, discussions | [Visit](https://github.com/NoFxAiOS/nofx) |
 | 🐦 Twitter | Announcements, updates | [@nofx_official](https://x.com/nofx_official) |
 
 ### Core Team
@@ -228,10 +228,10 @@ NOFX offers bounties for valuable contributions:
 
 | Metric | Count |
 |--------|-------|
-| GitHub Stars | Check [repo](https://github.com/tinkle-community/nofx) |
+| GitHub Stars | Check [repo](https://github.com/NoFxAiOS/nofx) |
 | Contributors | 21+ |
-| Open Issues | Check [issues](https://github.com/tinkle-community/nofx/issues) |
-| Merged PRs | Check [pulls](https://github.com/tinkle-community/nofx/pulls?q=is%3Apr+is%3Amerged) |
+| Open Issues | Check [issues](https://github.com/NoFxAiOS/nofx/issues) |
+| Merged PRs | Check [pulls](https://github.com/NoFxAiOS/nofx/pulls?q=is%3Apr+is%3Amerged) |
 
 ---
 
@@ -241,6 +241,7 @@ NOFX offers bounties for valuable contributions:
 - **Want to claim bounty?** → [Bounty Guide](bounty-guide.md)
 - **Found a security issue?** → [Security Policy](../../SECURITY.md)
 - **Have questions?** → [Telegram Community](https://t.me/nofx_dev_community)
+- **Verify official accounts?** → [Official Accounts & Anti-Impersonation](OFFICIAL_ACCOUNTS.md)
 
 ---
 

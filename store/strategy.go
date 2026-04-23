@@ -1,32 +1,95 @@
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
+
+// Hard limits to prevent token explosion in AI requests
+const (
+	MaxCandidateCoins = 10
+	MaxPositions      = 3
+	MaxTimeframes     = 4
+	MinKlineCount     = 10
+	MaxKlineCount     = 30
+)
+
+// ClampLimits enforces product-level limits on strategy config to prevent token overflow.
+func (c *StrategyConfig) ClampLimits() {
+	// Clamp coin source limits
+	if c.CoinSource.AI500Limit > MaxCandidateCoins {
+		c.CoinSource.AI500Limit = MaxCandidateCoins
+	}
+	if c.CoinSource.OITopLimit > MaxCandidateCoins {
+		c.CoinSource.OITopLimit = MaxCandidateCoins
+	}
+	if c.CoinSource.OILowLimit > MaxCandidateCoins {
+		c.CoinSource.OILowLimit = MaxCandidateCoins
+	}
+
+	// Clamp static coins
+	if len(c.CoinSource.StaticCoins) > MaxCandidateCoins {
+		c.CoinSource.StaticCoins = c.CoinSource.StaticCoins[:MaxCandidateCoins]
+	}
+
+	// Clamp kline count
+	if c.Indicators.Klines.PrimaryCount < MinKlineCount {
+		c.Indicators.Klines.PrimaryCount = MinKlineCount
+	}
+	if c.Indicators.Klines.PrimaryCount > MaxKlineCount {
+		c.Indicators.Klines.PrimaryCount = MaxKlineCount
+	}
+	if c.Indicators.Klines.LongerCount > MaxKlineCount {
+		c.Indicators.Klines.LongerCount = MaxKlineCount
+	}
+
+	// Clamp timeframes
+	if len(c.Indicators.Klines.SelectedTimeframes) > MaxTimeframes {
+		c.Indicators.Klines.SelectedTimeframes = c.Indicators.Klines.SelectedTimeframes[:MaxTimeframes]
+	}
+
+	// Clamp max positions
+	if c.RiskControl.MaxPositions > MaxPositions {
+		c.RiskControl.MaxPositions = MaxPositions
+	}
+
+}
 
 // StrategyStore strategy storage
 type StrategyStore struct {
-	db *sql.DB
+	db *gorm.DB
 }
 
 // Strategy strategy configuration
 type Strategy struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"user_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	IsActive    bool      `json:"is_active"`    // whether it is active (a user can only have one active strategy)
-	IsDefault   bool      `json:"is_default"`   // whether it is a system default strategy
-	Config      string    `json:"config"`       // strategy configuration in JSON format
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            string    `gorm:"primaryKey" json:"id"`
+	UserID        string    `gorm:"column:user_id;not null;default:'';index" json:"user_id"`
+	Name          string    `gorm:"not null" json:"name"`
+	Description   string    `gorm:"default:''" json:"description"`
+	IsActive      bool      `gorm:"column:is_active;default:false;index" json:"is_active"`
+	IsDefault     bool      `gorm:"column:is_default;default:false" json:"is_default"`
+	IsPublic      bool      `gorm:"column:is_public;default:false;index" json:"is_public"`    // whether visible in strategy market
+	ConfigVisible bool      `gorm:"column:config_visible;default:true" json:"config_visible"` // whether config details are visible
+	Config        string    `gorm:"not null;default:'{}'" json:"config"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
+
+func (Strategy) TableName() string { return "strategies" }
 
 // StrategyConfig strategy configuration details (JSON structure)
 type StrategyConfig struct {
+	// Strategy type: "ai_trading" (default) or "grid_trading"
+	StrategyType string `json:"strategy_type,omitempty"`
+
+	// language setting: "zh" for Chinese, "en" for English
+	// This determines the language used for data formatting and prompt generation
+	Language string `json:"language,omitempty"`
 	// coin source configuration
 	CoinSource CoinSourceConfig `json:"coin_source"`
 	// quantitative data configuration
@@ -37,6 +100,43 @@ type StrategyConfig struct {
 	RiskControl RiskControlConfig `json:"risk_control"`
 	// editable sections of System Prompt
 	PromptSections PromptSectionsConfig `json:"prompt_sections,omitempty"`
+
+	// Grid trading configuration (only used when StrategyType == "grid_trading")
+	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
+}
+
+// GridStrategyConfig grid trading specific configuration
+type GridStrategyConfig struct {
+	// Trading pair (e.g., "BTCUSDT")
+	Symbol string `json:"symbol"`
+	// Number of grid levels (5-50)
+	GridCount int `json:"grid_count"`
+	// Total investment in USDT
+	TotalInvestment float64 `json:"total_investment"`
+	// Leverage (1-20)
+	Leverage int `json:"leverage"`
+	// Upper price boundary (0 = auto-calculate from ATR)
+	UpperPrice float64 `json:"upper_price"`
+	// Lower price boundary (0 = auto-calculate from ATR)
+	LowerPrice float64 `json:"lower_price"`
+	// Use ATR to auto-calculate bounds
+	UseATRBounds bool `json:"use_atr_bounds"`
+	// ATR multiplier for bound calculation (default 2.0)
+	ATRMultiplier float64 `json:"atr_multiplier"`
+	// Position distribution: "uniform" | "gaussian" | "pyramid"
+	Distribution string `json:"distribution"`
+	// Maximum drawdown percentage before emergency exit
+	MaxDrawdownPct float64 `json:"max_drawdown_pct"`
+	// Stop loss percentage per position
+	StopLossPct float64 `json:"stop_loss_pct"`
+	// Daily loss limit percentage
+	DailyLossLimitPct float64 `json:"daily_loss_limit_pct"`
+	// Use maker-only orders for lower fees
+	UseMakerOnly bool `json:"use_maker_only"`
+	// Enable automatic grid direction adjustment based on box breakouts
+	EnableDirectionAdjust bool `json:"enable_direction_adjust"`
+	// Direction bias ratio for long_bias/short_bias modes (default 0.7 = 70%/30%)
+	DirectionBiasRatio float64 `json:"direction_bias_ratio"`
 }
 
 // PromptSectionsConfig editable sections of System Prompt
@@ -53,22 +153,31 @@ type PromptSectionsConfig struct {
 
 // CoinSourceConfig coin source configuration
 type CoinSourceConfig struct {
-	// source type: "static" | "coinpool" | "oi_top" | "mixed"
+	// source type: "static" | "ai500" | "oi_top" | "oi_low" | "mixed"
 	SourceType string `json:"source_type"`
 	// static coin list (used when source_type = "static")
 	StaticCoins []string `json:"static_coins,omitempty"`
+	// excluded coins list (filtered out from all sources)
+	ExcludedCoins []string `json:"excluded_coins,omitempty"`
 	// whether to use AI500 coin pool
-	UseCoinPool bool `json:"use_coin_pool"`
+	UseAI500 bool `json:"use_ai500"`
 	// AI500 coin pool maximum count
-	CoinPoolLimit int `json:"coin_pool_limit,omitempty"`
-	// AI500 coin pool API URL (strategy-level configuration)
-	CoinPoolAPIURL string `json:"coin_pool_api_url,omitempty"`
-	// whether to use OI Top
+	AI500Limit int `json:"ai500_limit,omitempty"`
+	// whether to use OI Top (OI increase ranking, suitable for long positions)
 	UseOITop bool `json:"use_oi_top"`
 	// OI Top maximum count
 	OITopLimit int `json:"oi_top_limit,omitempty"`
-	// OI Top API URL (strategy-level configuration)
-	OITopAPIURL string `json:"oi_top_api_url,omitempty"`
+	// whether to use OI Low (OI decrease ranking, suitable for short positions)
+	UseOILow bool `json:"use_oi_low"`
+	// OI Low maximum count
+	OILowLimit int `json:"oi_low_limit,omitempty"`
+	// whether to use Hyperliquid All coins (all available perp pairs)
+	UseHyperAll bool `json:"use_hyper_all"`
+	// whether to use Hyperliquid Main coins (top N by 24h volume)
+	UseHyperMain bool `json:"use_hyper_main"`
+	// Hyperliquid Main maximum count (default 20)
+	HyperMainLimit int `json:"hyper_main_limit,omitempty"`
+	// Note: API URLs are now built automatically using NofxOSAPIKey from IndicatorConfig
 }
 
 // IndicatorConfig indicator configuration
@@ -82,6 +191,7 @@ type IndicatorConfig struct {
 	EnableMACD        bool `json:"enable_macd"`
 	EnableRSI         bool `json:"enable_rsi"`
 	EnableATR         bool `json:"enable_atr"`
+	EnableBOLL        bool `json:"enable_boll"` // Bollinger Bands
 	EnableVolume      bool `json:"enable_volume"`
 	EnableOI          bool `json:"enable_oi"`           // open interest
 	EnableFundingRate bool `json:"enable_funding_rate"` // funding rate
@@ -91,11 +201,34 @@ type IndicatorConfig struct {
 	RSIPeriods []int `json:"rsi_periods,omitempty"` // default [7, 14]
 	// ATR period configuration
 	ATRPeriods []int `json:"atr_periods,omitempty"` // default [14]
+	// BOLL period configuration (period, standard deviation multiplier is fixed at 2)
+	BOLLPeriods []int `json:"boll_periods,omitempty"` // default [20] - can select multiple timeframes
 	// external data sources
 	ExternalDataSources []ExternalDataSource `json:"external_data_sources,omitempty"`
+
+	// ========== NofxOS Unified API Configuration ==========
+	// Unified API Key for all NofxOS data sources
+	NofxOSAPIKey string `json:"nofxos_api_key,omitempty"`
+
 	// quantitative data sources (capital flow, position changes, price changes)
-	EnableQuantData bool   `json:"enable_quant_data"`            // whether to enable quantitative data
-	QuantDataAPIURL string `json:"quant_data_api_url,omitempty"` // quantitative data API address
+	EnableQuantData    bool `json:"enable_quant_data"`    // whether to enable quantitative data
+	EnableQuantOI      bool `json:"enable_quant_oi"`      // whether to show OI data
+	EnableQuantNetflow bool `json:"enable_quant_netflow"` // whether to show Netflow data
+
+	// OI ranking data (market-wide open interest increase/decrease rankings)
+	EnableOIRanking   bool   `json:"enable_oi_ranking"`             // whether to enable OI ranking data
+	OIRankingDuration string `json:"oi_ranking_duration,omitempty"` // duration: 1h, 4h, 24h
+	OIRankingLimit    int    `json:"oi_ranking_limit,omitempty"`    // number of entries (default 10)
+
+	// NetFlow ranking data (market-wide fund flow rankings - institution/personal)
+	EnableNetFlowRanking   bool   `json:"enable_netflow_ranking"`             // whether to enable NetFlow ranking data
+	NetFlowRankingDuration string `json:"netflow_ranking_duration,omitempty"` // duration: 1h, 4h, 24h
+	NetFlowRankingLimit    int    `json:"netflow_ranking_limit,omitempty"`    // number of entries (default 10)
+
+	// Price ranking data (market-wide gainers/losers)
+	EnablePriceRanking   bool   `json:"enable_price_ranking"`             // whether to enable price ranking data
+	PriceRankingDuration string `json:"price_ranking_duration,omitempty"` // durations: "1h" or "1h,4h,24h"
+	PriceRankingLimit    int    `json:"price_ranking_limit,omitempty"`    // number of entries per ranking (default 10)
 }
 
 // KlineConfig K-line configuration
@@ -116,10 +249,10 @@ type KlineConfig struct {
 
 // ExternalDataSource external data source configuration
 type ExternalDataSource struct {
-	Name        string            `json:"name"`         // data source name
-	Type        string            `json:"type"`         // type: "api" | "webhook"
-	URL         string            `json:"url"`          // API URL
-	Method      string            `json:"method"`       // HTTP method
+	Name        string            `json:"name"`   // data source name
+	Type        string            `json:"type"`   // type: "api" | "webhook"
+	URL         string            `json:"url"`    // API URL
+	Method      string            `json:"method"` // HTTP method
 	Headers     map[string]string `json:"headers,omitempty"`
 	DataPath    string            `json:"data_path,omitempty"`    // JSON data path
 	RefreshSecs int               `json:"refresh_secs,omitempty"` // refresh interval (seconds)
@@ -127,56 +260,38 @@ type ExternalDataSource struct {
 
 // RiskControlConfig risk control configuration
 type RiskControlConfig struct {
-	// maximum number of positions
+	// Max number of coins held simultaneously (CODE ENFORCED)
 	MaxPositions int `json:"max_positions"`
-	// BTC/ETH maximum leverage
+
+	// BTC/ETH exchange leverage for opening positions (AI guided)
 	BTCETHMaxLeverage int `json:"btc_eth_max_leverage"`
-	// altcoin maximum leverage
+	// Altcoin exchange leverage for opening positions (AI guided)
 	AltcoinMaxLeverage int `json:"altcoin_max_leverage"`
-	// minimum risk-reward ratio
-	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
-	// maximum margin usage
+
+	// BTC/ETH single position max value = equity × this ratio (CODE ENFORCED, default: 5)
+	BTCETHMaxPositionValueRatio float64 `json:"btc_eth_max_position_value_ratio"`
+	// Altcoin single position max value = equity × this ratio (CODE ENFORCED, default: 1)
+	AltcoinMaxPositionValueRatio float64 `json:"altcoin_max_position_value_ratio"`
+
+	// Max margin utilization (e.g. 0.9 = 90%) (CODE ENFORCED)
 	MaxMarginUsage float64 `json:"max_margin_usage"`
-	// maximum position ratio per coin (relative to account equity)
-	MaxPositionRatio float64 `json:"max_position_ratio"`
-	// minimum position size (USDT)
+	// Min position size in USDT (CODE ENFORCED)
 	MinPositionSize float64 `json:"min_position_size"`
-	// minimum confidence level
+
+	// Min take_profit / stop_loss ratio (AI guided)
+	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
+	// Min AI confidence to open position (AI guided)
 	MinConfidence int `json:"min_confidence"`
 }
 
+// NewStrategyStore creates a new StrategyStore
+func NewStrategyStore(db *gorm.DB) *StrategyStore {
+	return &StrategyStore{db: db}
+}
+
 func (s *StrategyStore) initTables() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS strategies (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL DEFAULT '',
-			name TEXT NOT NULL,
-			description TEXT DEFAULT '',
-			is_active BOOLEAN DEFAULT 0,
-			is_default BOOLEAN DEFAULT 0,
-			config TEXT NOT NULL DEFAULT '{}',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
-	}
-
-	// create indexes
-	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_strategies_user_id ON strategies(user_id)`)
-	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_strategies_is_active ON strategies(is_active)`)
-
-	// trigger: automatically update updated_at on update
-	_, err = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS update_strategies_updated_at
-		AFTER UPDATE ON strategies
-		BEGIN
-			UPDATE strategies SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-		END
-	`)
-
-	return err
+	// AutoMigrate will add missing columns without dropping existing data
+	return s.db.AutoMigrate(&Strategy{})
 }
 
 func (s *StrategyStore) initDefaultData() error {
@@ -186,48 +301,74 @@ func (s *StrategyStore) initDefaultData() error {
 
 // GetDefaultStrategyConfig returns the default strategy configuration for the given language
 func GetDefaultStrategyConfig(lang string) StrategyConfig {
+	// Normalize language to "zh" or "en"
+	normalizedLang := "en"
+	if lang == "zh" {
+		normalizedLang = "zh"
+	}
+
 	config := StrategyConfig{
+		Language: normalizedLang,
 		CoinSource: CoinSourceConfig{
-			SourceType:     "coinpool",
-			UseCoinPool:    true,
-			CoinPoolLimit:  30,
-			CoinPoolAPIURL: "http://nofxaios.com:30006/api/ai500/list?auth=cm_568c67eae410d912c54c",
-			UseOITop:       false,
-			OITopLimit:     20,
-			OITopAPIURL:    "http://nofxaios.com:30006/api/oi/top-ranking?limit=20&duration=1h&auth=cm_568c67eae410d912c54c",
+			SourceType: "ai500",
+			UseAI500:   true,
+			AI500Limit: 3,
+			UseOITop:   false,
+			OITopLimit: 3,
+			UseOILow:   false,
+			OILowLimit: 3,
 		},
 		Indicators: IndicatorConfig{
 			Klines: KlineConfig{
 				PrimaryTimeframe:     "5m",
-				PrimaryCount:         30,
+				PrimaryCount:         20,
 				LongerTimeframe:      "4h",
 				LongerCount:          10,
 				EnableMultiTimeframe: true,
-				SelectedTimeframes:   []string{"5m", "15m", "1h", "4h"},
+				SelectedTimeframes:   []string{"5m", "15m", "1h"},
 			},
 			EnableRawKlines:   true, // Required - raw OHLCV data for AI analysis
 			EnableEMA:         false,
 			EnableMACD:        false,
 			EnableRSI:         false,
 			EnableATR:         false,
+			EnableBOLL:        false,
 			EnableVolume:      true,
 			EnableOI:          true,
 			EnableFundingRate: true,
 			EMAPeriods:        []int{20, 50},
 			RSIPeriods:        []int{7, 14},
 			ATRPeriods:        []int{14},
-			EnableQuantData:   true,
-			QuantDataAPIURL:   "http://nofxaios.com:30006/api/coin/{symbol}?include=netflow,oi,price&auth=cm_568c67eae410d912c54c",
+			BOLLPeriods:       []int{20},
+			// NofxOS unified API key
+			NofxOSAPIKey: "cm_568c67eae410d912c54c",
+			// Quant data
+			EnableQuantData:    true,
+			EnableQuantOI:      true,
+			EnableQuantNetflow: true,
+			// OI ranking data
+			EnableOIRanking:   true,
+			OIRankingDuration: "1h",
+			OIRankingLimit:    10,
+			// NetFlow ranking data
+			EnableNetFlowRanking:   true,
+			NetFlowRankingDuration: "1h",
+			NetFlowRankingLimit:    10,
+			// Price ranking data
+			EnablePriceRanking:   true,
+			PriceRankingDuration: "1h,4h,24h",
+			PriceRankingLimit:    10,
 		},
 		RiskControl: RiskControlConfig{
-			MaxPositions:       3,
-			BTCETHMaxLeverage:  5,
-			AltcoinMaxLeverage: 5,
-			MinRiskRewardRatio: 3.0,
-			MaxMarginUsage:     0.9,
-			MaxPositionRatio:   1.5,
-			MinPositionSize:    12,
-			MinConfidence:      75,
+			MaxPositions:                 3,   // Max 3 coins simultaneously (CODE ENFORCED)
+			BTCETHMaxLeverage:            5,   // BTC/ETH exchange leverage (AI guided)
+			AltcoinMaxLeverage:           5,   // Altcoin exchange leverage (AI guided)
+			BTCETHMaxPositionValueRatio:  5.0, // BTC/ETH: max position = 5x equity (CODE ENFORCED)
+			AltcoinMaxPositionValueRatio: 1.0, // Altcoin: max position = 1x equity (CODE ENFORCED)
+			MaxMarginUsage:               0.9, // Max 90% margin usage (CODE ENFORCED)
+			MinPositionSize:              12,  // Min 12 USDT per position (CODE ENFORCED)
+			MinRiskRewardRatio:           3.0, // Min 3:1 profit/loss ratio (AI guided)
+			MinConfidence:                75,  // Min 75% confidence (AI guided)
 		},
 	}
 
@@ -278,65 +419,67 @@ Only enter positions when multiple signals resonate. Freely use any effective an
 
 // Create create a strategy
 func (s *StrategyStore) Create(strategy *Strategy) error {
-	_, err := s.db.Exec(`
-		INSERT INTO strategies (id, user_id, name, description, is_active, is_default, config)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, strategy.ID, strategy.UserID, strategy.Name, strategy.Description, strategy.IsActive, strategy.IsDefault, strategy.Config)
-	return err
+	return s.db.Create(strategy).Error
 }
 
 // Update update a strategy
 func (s *StrategyStore) Update(strategy *Strategy) error {
-	_, err := s.db.Exec(`
-		UPDATE strategies SET
-			name = ?, description = ?, config = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND user_id = ?
-	`, strategy.Name, strategy.Description, strategy.Config, strategy.ID, strategy.UserID)
-	return err
+	return s.db.Model(&Strategy{}).
+		Where("id = ? AND user_id = ?", strategy.ID, strategy.UserID).
+		Updates(map[string]interface{}{
+			"name":           strategy.Name,
+			"description":    strategy.Description,
+			"config":         strategy.Config,
+			"is_public":      strategy.IsPublic,
+			"config_visible": strategy.ConfigVisible,
+			"updated_at":     time.Now().UTC(),
+		}).Error
 }
 
 // Delete delete a strategy
 func (s *StrategyStore) Delete(userID, id string) error {
 	// do not allow deleting system default strategy
-	var isDefault bool
-	s.db.QueryRow(`SELECT is_default FROM strategies WHERE id = ?`, id).Scan(&isDefault)
-	if isDefault {
-		return fmt.Errorf("cannot delete system default strategy")
+	var st Strategy
+	if err := s.db.Where("id = ?", id).First(&st).Error; err == nil {
+		if st.IsDefault {
+			return fmt.Errorf("cannot delete system default strategy")
+		}
+		if st.IsActive {
+			return fmt.Errorf("cannot delete active strategy")
+		}
 	}
 
-	_, err := s.db.Exec(`DELETE FROM strategies WHERE id = ? AND user_id = ?`, id, userID)
-	return err
+	// Check if any trader references this strategy
+	var count int64
+	if err := s.db.Model(&Trader{}).
+		Where("user_id = ? AND strategy_id = ?", userID, id).
+		Count(&count).Error; err == nil && count > 0 {
+		return fmt.Errorf("cannot delete strategy in use by %d trader(s) - reassign those traders first", count)
+	}
+
+	return s.db.Where("id = ? AND user_id = ?", id, userID).Delete(&Strategy{}).Error
 }
 
 // List get user's strategy list
 func (s *StrategyStore) List(userID string) ([]*Strategy, error) {
-	// get user's own strategies + system default strategy
-	rows, err := s.db.Query(`
-		SELECT id, user_id, name, description, is_active, is_default, config, created_at, updated_at
-		FROM strategies
-		WHERE user_id = ? OR is_default = 1
-		ORDER BY is_default DESC, created_at DESC
-	`, userID)
+	var strategies []*Strategy
+	err := s.db.Where("user_id = ? OR is_default = ?", userID, true).
+		Order("is_default DESC, created_at DESC").
+		Find(&strategies).Error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return strategies, nil
+}
 
+// ListPublic get all public strategies for the strategy market
+func (s *StrategyStore) ListPublic() ([]*Strategy, error) {
 	var strategies []*Strategy
-	for rows.Next() {
-		var st Strategy
-		var createdAt, updatedAt string
-		err := rows.Scan(
-			&st.ID, &st.UserID, &st.Name, &st.Description,
-			&st.IsActive, &st.IsDefault, &st.Config,
-			&createdAt, &updatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		st.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		st.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
-		strategies = append(strategies, &st)
+	err := s.db.Where("is_public = ?", true).
+		Order("created_at DESC").
+		Find(&strategies).Error
+	if err != nil {
+		return nil, err
 	}
 	return strategies, nil
 }
@@ -344,93 +487,52 @@ func (s *StrategyStore) List(userID string) ([]*Strategy, error) {
 // Get get a single strategy
 func (s *StrategyStore) Get(userID, id string) (*Strategy, error) {
 	var st Strategy
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, user_id, name, description, is_active, is_default, config, created_at, updated_at
-		FROM strategies
-		WHERE id = ? AND (user_id = ? OR is_default = 1)
-	`, id, userID).Scan(
-		&st.ID, &st.UserID, &st.Name, &st.Description,
-		&st.IsActive, &st.IsDefault, &st.Config,
-		&createdAt, &updatedAt,
-	)
+	err := s.db.Where("id = ? AND (user_id = ? OR is_default = ?)", id, userID, true).
+		First(&st).Error
 	if err != nil {
 		return nil, err
 	}
-	st.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	st.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 	return &st, nil
 }
 
 // GetActive get user's currently active strategy
 func (s *StrategyStore) GetActive(userID string) (*Strategy, error) {
 	var st Strategy
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, user_id, name, description, is_active, is_default, config, created_at, updated_at
-		FROM strategies
-		WHERE user_id = ? AND is_active = 1
-	`, userID).Scan(
-		&st.ID, &st.UserID, &st.Name, &st.Description,
-		&st.IsActive, &st.IsDefault, &st.Config,
-		&createdAt, &updatedAt,
-	)
-	if err == sql.ErrNoRows {
+	err := s.db.Where("user_id = ? AND is_active = ?", userID, true).First(&st).Error
+	if err == gorm.ErrRecordNotFound {
 		// no active strategy, return system default strategy
 		return s.GetDefault()
 	}
 	if err != nil {
 		return nil, err
 	}
-	st.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	st.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 	return &st, nil
 }
 
 // GetDefault get system default strategy
 func (s *StrategyStore) GetDefault() (*Strategy, error) {
 	var st Strategy
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, user_id, name, description, is_active, is_default, config, created_at, updated_at
-		FROM strategies
-		WHERE is_default = 1
-		LIMIT 1
-	`).Scan(
-		&st.ID, &st.UserID, &st.Name, &st.Description,
-		&st.IsActive, &st.IsDefault, &st.Config,
-		&createdAt, &updatedAt,
-	)
+	err := s.db.Where("is_default = ?", true).First(&st).Error
 	if err != nil {
 		return nil, err
 	}
-	st.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	st.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 	return &st, nil
 }
 
 // SetActive set active strategy (will first deactivate other strategies)
 func (s *StrategyStore) SetActive(userID, strategyID string) error {
-	// begin transaction
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// first deactivate all strategies for the user
+		if err := tx.Model(&Strategy{}).Where("user_id = ?", userID).
+			Update("is_active", false).Error; err != nil {
+			return err
+		}
 
-	// first deactivate all strategies for the user
-	_, err = tx.Exec(`UPDATE strategies SET is_active = 0 WHERE user_id = ?`, userID)
-	if err != nil {
-		return err
-	}
-
-	// activate specified strategy
-	_, err = tx.Exec(`UPDATE strategies SET is_active = 1 WHERE id = ? AND (user_id = ? OR is_default = 1)`, strategyID, userID)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit()
+		// activate specified strategy
+		return tx.Model(&Strategy{}).
+			Where("id = ? AND (user_id = ? OR is_default = ?)", strategyID, userID, true).
+			Update("is_active", true).Error
+	})
 }
 
 // Duplicate duplicate a strategy (used to create custom strategy based on default strategy)
@@ -472,4 +574,309 @@ func (s *Strategy) SetConfig(config *StrategyConfig) error {
 	}
 	s.Config = string(data)
 	return nil
+}
+
+// ============================================================================
+// Token Estimation
+// ============================================================================
+
+// TokenEstimate holds the result of token estimation
+type TokenEstimate struct {
+	Total       int            `json:"total"`
+	Breakdown   TokenBreakdown `json:"breakdown"`
+	ModelLimits []ModelLimit   `json:"model_limits"`
+	Suggestions []string       `json:"suggestions"`
+}
+
+// TokenBreakdown shows estimated tokens per component
+type TokenBreakdown struct {
+	SystemPrompt  int `json:"system_prompt"`
+	MarketData    int `json:"market_data"`
+	RankingData   int `json:"ranking_data"`
+	QuantData     int `json:"quant_data"`
+	FixedOverhead int `json:"fixed_overhead"`
+}
+
+// ModelLimit shows token usage against a specific model's context limit
+type ModelLimit struct {
+	Name         string `json:"name"`
+	ContextLimit int    `json:"context_limit"`
+	UsagePct     int    `json:"usage_pct"`
+	Level        string `json:"level"` // "ok" | "warning" | "danger"
+}
+
+// Context window sizes (tokens) for each model family
+const (
+	contextLimitDeepSeek = 131_072   // 128K
+	contextLimitOpenAI   = 128_000   // 128K
+	contextLimitClaude   = 200_000   // 200K
+	contextLimitQwen     = 131_072   // 128K
+	contextLimitGemini   = 1_000_000 // 1M
+	contextLimitGrok     = 131_072   // 128K
+	contextLimitKimi     = 131_072   // 128K
+	contextLimitMinimax  = 1_000_000 // 1M
+)
+
+// ModelContextLimits maps provider names to their context window sizes (in tokens)
+var ModelContextLimits = map[string]int{
+	"deepseek": contextLimitDeepSeek,
+	"openai":   contextLimitOpenAI,
+	"claude":   contextLimitClaude,
+	"qwen":     contextLimitQwen,
+	"gemini":   contextLimitGemini,
+	"grok":     contextLimitGrok,
+	"kimi":     contextLimitKimi,
+	"minimax":  contextLimitMinimax,
+}
+
+// GetContextLimit returns the context limit for a given provider
+func GetContextLimit(provider string) int {
+	if limit, ok := ModelContextLimits[provider]; ok {
+		return limit
+	}
+	return contextLimitDeepSeek // safe default
+}
+
+// GetContextLimitForClient returns context limit for a provider+model pair.
+// For claw402, the underlying model is inferred from the model name prefix.
+func GetContextLimitForClient(provider, model string) int {
+	if provider == "claw402" {
+		switch {
+		case strings.HasPrefix(model, "claude"):
+			return ModelContextLimits["claude"]
+		case strings.HasPrefix(model, "gpt"), strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"):
+			return ModelContextLimits["openai"]
+		case strings.HasPrefix(model, "gemini"):
+			return ModelContextLimits["gemini"]
+		case strings.HasPrefix(model, "grok"):
+			return ModelContextLimits["grok"]
+		case strings.HasPrefix(model, "kimi"):
+			return ModelContextLimits["kimi"]
+		case strings.HasPrefix(model, "qwen"):
+			return ModelContextLimits["qwen"]
+		case strings.HasPrefix(model, "minimax"):
+			return ModelContextLimits["minimax"]
+		case strings.HasPrefix(model, "deepseek"):
+			return ModelContextLimits["deepseek"]
+		default:
+			return ModelContextLimits["deepseek"]
+		}
+	}
+	return GetContextLimit(provider)
+}
+
+// EstimateTokens estimates the total token count for a strategy configuration.
+// This is a pure computation based on config fields — no network calls.
+func (c *StrategyConfig) EstimateTokens() TokenEstimate {
+	breakdown := TokenBreakdown{}
+
+	// --- System Prompt ---
+	// Base system prompt: schema + role + rules + output format
+	baseChars := 4000 // English default
+	if c.Language == "zh" {
+		baseChars = 3000
+	}
+	// Add prompt sections
+	baseChars += len(c.PromptSections.RoleDefinition)
+	baseChars += len(c.PromptSections.TradingFrequency)
+	baseChars += len(c.PromptSections.EntryStandards)
+	baseChars += len(c.PromptSections.DecisionProcess)
+	baseChars += len(c.CustomPrompt)
+
+	if c.Language == "zh" {
+		breakdown.SystemPrompt = baseChars / 2 // CJK: ~2 chars per token
+	} else {
+		breakdown.SystemPrompt = baseChars / 4 // English: ~4 chars per token
+	}
+
+	// --- Fixed Overhead ---
+	// Time, BTC price, account info, section headers
+	breakdown.FixedOverhead = 800 / 4 // ~200 tokens
+
+	// --- Market Data ---
+	numCoins := c.getEffectiveCoinCount()
+	numTimeframes := c.getEffectiveTimeframeCount()
+	klineCount := c.Indicators.Klines.PrimaryCount
+	if klineCount <= 0 {
+		klineCount = 20
+	}
+
+	// Per coin per timeframe: kline OHLCV rows
+	charsPerCoinTF := klineCount * 80 // each OHLCV line ~80 chars
+
+	// Add enabled indicator overhead per timeframe
+	indicatorCharsPerLine := 0
+	if c.Indicators.EnableEMA {
+		indicatorCharsPerLine += 20 // EMA values appended
+	}
+	if c.Indicators.EnableMACD {
+		indicatorCharsPerLine += 30
+	}
+	if c.Indicators.EnableRSI {
+		indicatorCharsPerLine += 15
+	}
+	if c.Indicators.EnableATR {
+		indicatorCharsPerLine += 15
+	}
+	if c.Indicators.EnableBOLL {
+		indicatorCharsPerLine += 25
+	}
+	if c.Indicators.EnableVolume {
+		indicatorCharsPerLine += 10
+	}
+	charsPerCoinTF += klineCount * indicatorCharsPerLine
+
+	totalMarketChars := numCoins * numTimeframes * charsPerCoinTF
+
+	// OI + Funding per coin
+	if c.Indicators.EnableOI || c.Indicators.EnableFundingRate {
+		totalMarketChars += numCoins * 100
+	}
+
+	breakdown.MarketData = totalMarketChars / 4 // numeric data: ~4 chars per token
+
+	// --- Quant Data ---
+	if c.Indicators.EnableQuantData {
+		quantCharsPerCoin := 0
+		if c.Indicators.EnableQuantOI {
+			quantCharsPerCoin += 300
+		}
+		if c.Indicators.EnableQuantNetflow {
+			quantCharsPerCoin += 300
+		}
+		breakdown.QuantData = (numCoins * quantCharsPerCoin) / 4
+	}
+
+	// --- Ranking Data ---
+	rankingChars := 0
+	if c.Indicators.EnableOIRanking {
+		limit := c.Indicators.OIRankingLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		rankingChars += limit * 60
+	}
+	if c.Indicators.EnableNetFlowRanking {
+		limit := c.Indicators.NetFlowRankingLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		rankingChars += limit * 80
+	}
+	if c.Indicators.EnablePriceRanking {
+		limit := c.Indicators.PriceRankingLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		// Count durations (comma-separated)
+		numDurations := 1
+		if c.Indicators.PriceRankingDuration != "" {
+			numDurations = len(strings.Split(c.Indicators.PriceRankingDuration, ","))
+		}
+		rankingChars += limit * numDurations * 40
+	}
+	breakdown.RankingData = rankingChars / 4
+
+	// --- Total with 15% safety margin ---
+	subtotal := breakdown.SystemPrompt + breakdown.MarketData + breakdown.RankingData + breakdown.QuantData + breakdown.FixedOverhead
+	total := subtotal * 115 / 100
+
+	// --- Model limits ---
+	modelLimits := make([]ModelLimit, 0, len(ModelContextLimits))
+	for name, limit := range ModelContextLimits {
+		pct := total * 100 / limit
+		level := "ok"
+		if pct >= 100 {
+			level = "danger"
+		} else if pct >= 80 {
+			level = "warning"
+		}
+		modelLimits = append(modelLimits, ModelLimit{
+			Name:         name,
+			ContextLimit: limit,
+			UsagePct:     pct,
+			Level:        level,
+		})
+	}
+
+	// Sort by usage_pct desc, then name asc for deterministic order
+	sort.Slice(modelLimits, func(i, j int) bool {
+		if modelLimits[i].UsagePct != modelLimits[j].UsagePct {
+			return modelLimits[i].UsagePct > modelLimits[j].UsagePct
+		}
+		return modelLimits[i].Name < modelLimits[j].Name
+	})
+
+	// --- Suggestions ---
+	var suggestions []string
+	// Find the strictest model (smallest context)
+	minLimit := 0
+	for _, limit := range ModelContextLimits {
+		if minLimit == 0 || limit < minLimit {
+			minLimit = limit
+		}
+	}
+	if minLimit > 0 && total > minLimit {
+		if numTimeframes > 1 {
+			savedPerTF := (numCoins * klineCount * (80 + indicatorCharsPerLine)) / 4 * 115 / 100
+			suggestions = append(suggestions, fmt.Sprintf("Reduce 1 timeframe to save ~%d tokens", savedPerTF))
+		}
+		if numCoins > 1 {
+			savedPerCoin := (numTimeframes * klineCount * (80 + indicatorCharsPerLine)) / 4 * 115 / 100
+			suggestions = append(suggestions, fmt.Sprintf("Reduce 1 coin to save ~%d tokens", savedPerCoin))
+		}
+		if klineCount > 15 {
+			suggestions = append(suggestions, "Reduce K-line count to 15 to save tokens")
+		}
+	}
+
+	return TokenEstimate{
+		Total:       total,
+		Breakdown:   breakdown,
+		ModelLimits: modelLimits,
+		Suggestions: suggestions,
+	}
+}
+
+// getEffectiveCoinCount returns the estimated number of coins that will be analyzed
+func (c *StrategyConfig) getEffectiveCoinCount() int {
+	count := 0
+	switch c.CoinSource.SourceType {
+	case "static":
+		count = len(c.CoinSource.StaticCoins)
+	case "ai500":
+		count = c.CoinSource.AI500Limit
+	case "oi_top":
+		count = c.CoinSource.OITopLimit
+	case "oi_low":
+		count = c.CoinSource.OILowLimit
+	case "mixed":
+		if c.CoinSource.UseAI500 {
+			count += c.CoinSource.AI500Limit
+		}
+		if c.CoinSource.UseOITop {
+			count += c.CoinSource.OITopLimit
+		}
+		if c.CoinSource.UseOILow {
+			count += c.CoinSource.OILowLimit
+		}
+	default:
+		count = c.CoinSource.AI500Limit
+	}
+	if count <= 0 {
+		count = 3
+	}
+	return count
+}
+
+// getEffectiveTimeframeCount returns the number of timeframes that will be used
+func (c *StrategyConfig) getEffectiveTimeframeCount() int {
+	if len(c.Indicators.Klines.SelectedTimeframes) > 0 {
+		return len(c.Indicators.Klines.SelectedTimeframes)
+	}
+	count := 1
+	if c.Indicators.Klines.LongerTimeframe != "" {
+		count++
+	}
+	return count
 }

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"nofx/logger"
 	"math"
+	"nofx/logger"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,16 +24,37 @@ var (
 	frCacheTTL     = 1 * time.Hour
 )
 
-// Get retrieves market data for the specified token
+// Get retrieves market data for the specified token (uses Binance data by default)
 func Get(symbol string) (*Data, error) {
+	return GetWithExchange(symbol, "binance")
+}
+
+// GetWithExchange retrieves market data for the specified token using exchange-specific data
+func GetWithExchange(symbol, exchange string) (*Data, error) {
 	var klines3m, klines4h []Kline
 	var err error
 	// Normalize symbol
 	symbol = Normalize(symbol)
-	// Get 3-minute K-line data (latest 10)
-	klines3m, err = WSMonitorCli.GetCurrentKlines(symbol, "3m") // Get more for calculation
-	if err != nil {
-		return nil, fmt.Errorf("Failed to get 3-minute K-line: %v", err)
+
+	// Check if this is an xyz dex asset (use Hyperliquid API)
+	isXyzAsset := IsXyzDexAsset(symbol)
+
+	// For hyperliquid exchange, also use Hyperliquid API
+	useHyperliquidAPI := isXyzAsset || strings.ToLower(exchange) == "hyperliquid"
+
+	// Get 3-minute K-line data (or 5-minute for xyz assets as 3m may not be available)
+	if useHyperliquidAPI {
+		// Use Hyperliquid API for xyz dex assets (use 5m since 3m may not be available)
+		klines3m, err = getKlinesFromHyperliquid(symbol, "5m", 100)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get 5-minute K-line from Hyperliquid: %v", err)
+		}
+	} else {
+		// Use CoinAnk for regular crypto assets with exchange-specific data
+		klines3m, err = getKlinesFromCoinAnk(symbol, "3m", exchange, 100)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get 3-minute K-line from CoinAnk (%s): %v", exchange, err)
+		}
 	}
 
 	// Data staleness detection: Prevent DOGEUSDT-style price freeze issues
@@ -42,10 +63,17 @@ func Get(symbol string) (*Data, error) {
 		return nil, fmt.Errorf("%s data is stale, possible cache failure", symbol)
 	}
 
-	// Get 4-hour K-line data (latest 10)
-	klines4h, err = WSMonitorCli.GetCurrentKlines(symbol, "4h") // Get more for indicator calculation
-	if err != nil {
-		return nil, fmt.Errorf("Failed to get 4-hour K-line: %v", err)
+	// Get 4-hour K-line data
+	if useHyperliquidAPI {
+		klines4h, err = getKlinesFromHyperliquid(symbol, "4h", 100)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get 4-hour K-line from Hyperliquid: %v", err)
+		}
+	} else {
+		klines4h, err = getKlinesFromCoinAnk(symbol, "4h", exchange, 100)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get 4-hour K-line from CoinAnk (%s): %v", exchange, err)
+		}
 	}
 
 	// Check if data is empty
@@ -144,12 +172,28 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	timeframeData := make(map[string]*TimeframeSeriesData)
 	var primaryKlines []Kline
 
+	// Check if this is an xyz dex asset (use Hyperliquid API)
+	isXyzAsset := IsXyzDexAsset(symbol)
+
 	// Get K-line data for each timeframe
 	for _, tf := range timeframes {
-		klines, err := WSMonitorCli.GetCurrentKlines(symbol, tf)
-		if err != nil {
-			logger.Infof("⚠️ Failed to get %s %s K-line: %v", symbol, tf, err)
-			continue
+		var klines []Kline
+		var err error
+
+		if isXyzAsset {
+			// Use Hyperliquid API for xyz dex assets
+			klines, err = getKlinesFromHyperliquid(symbol, tf, 200)
+			if err != nil {
+				logger.Infof("⚠️ Failed to get %s %s K-line from Hyperliquid: %v", symbol, tf, err)
+				continue
+			}
+		} else {
+			// Use CoinAnk for regular crypto assets (default to Binance)
+			klines, err = getKlinesFromCoinAnk(symbol, tf, "binance", 200)
+			if err != nil {
+				logger.Infof("⚠️ Failed to get %s %s K-line from CoinAnk: %v", symbol, tf, err)
+				continue
+			}
 		}
 
 		if len(klines) == 0 {
@@ -209,357 +253,6 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		FundingRate:   fundingRate,
 		TimeframeData: timeframeData,
 	}, nil
-}
-
-// calculateTimeframeSeries calculates series data for a single timeframe
-func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *TimeframeSeriesData {
-	if count <= 0 {
-		count = 10 // default
-	}
-
-	data := &TimeframeSeriesData{
-		Timeframe:   timeframe,
-		Klines:      make([]KlineBar, 0, count),
-		MidPrices:   make([]float64, 0, count),
-		EMA20Values: make([]float64, 0, count),
-		EMA50Values: make([]float64, 0, count),
-		MACDValues:  make([]float64, 0, count),
-		RSI7Values:  make([]float64, 0, count),
-		RSI14Values: make([]float64, 0, count),
-		Volume:      make([]float64, 0, count),
-	}
-
-	// Get latest N data points based on count from config
-	start := len(klines) - count
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i < len(klines); i++ {
-		// Store full OHLCV kline data
-		data.Klines = append(data.Klines, KlineBar{
-			Time:   klines[i].OpenTime,
-			Open:   klines[i].Open,
-			High:   klines[i].High,
-			Low:    klines[i].Low,
-			Close:  klines[i].Close,
-			Volume: klines[i].Volume,
-		})
-
-		// Keep MidPrices and Volume for backward compatibility
-		data.MidPrices = append(data.MidPrices, klines[i].Close)
-		data.Volume = append(data.Volume, klines[i].Volume)
-
-		// Calculate EMA20 for each point
-		if i >= 19 {
-			ema20 := calculateEMA(klines[:i+1], 20)
-			data.EMA20Values = append(data.EMA20Values, ema20)
-		}
-
-		// Calculate EMA50 for each point
-		if i >= 49 {
-			ema50 := calculateEMA(klines[:i+1], 50)
-			data.EMA50Values = append(data.EMA50Values, ema50)
-		}
-
-		// Calculate MACD for each point
-		if i >= 25 {
-			macd := calculateMACD(klines[:i+1])
-			data.MACDValues = append(data.MACDValues, macd)
-		}
-
-		// Calculate RSI for each point
-		if i >= 7 {
-			rsi7 := calculateRSI(klines[:i+1], 7)
-			data.RSI7Values = append(data.RSI7Values, rsi7)
-		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
-		}
-	}
-
-	// Calculate ATR14
-	data.ATR14 = calculateATR(klines, 14)
-
-	return data
-}
-
-// calculatePriceChangeByBars calculates how many K-lines to look back for price change based on timeframe
-func calculatePriceChangeByBars(klines []Kline, timeframe string, targetMinutes int) float64 {
-	if len(klines) < 2 {
-		return 0
-	}
-
-	// Parse timeframe to minutes
-	tfMinutes := parseTimeframeToMinutes(timeframe)
-	if tfMinutes <= 0 {
-		return 0
-	}
-
-	// Calculate how many K-lines to look back
-	barsBack := targetMinutes / tfMinutes
-	if barsBack < 1 {
-		barsBack = 1
-	}
-
-	currentPrice := klines[len(klines)-1].Close
-	idx := len(klines) - 1 - barsBack
-	if idx < 0 {
-		idx = 0
-	}
-
-	oldPrice := klines[idx].Close
-	if oldPrice > 0 {
-		return ((currentPrice - oldPrice) / oldPrice) * 100
-	}
-	return 0
-}
-
-// parseTimeframeToMinutes parses timeframe string to minutes
-func parseTimeframeToMinutes(tf string) int {
-	switch tf {
-	case "1m":
-		return 1
-	case "3m":
-		return 3
-	case "5m":
-		return 5
-	case "15m":
-		return 15
-	case "30m":
-		return 30
-	case "1h":
-		return 60
-	case "2h":
-		return 120
-	case "4h":
-		return 240
-	case "6h":
-		return 360
-	case "8h":
-		return 480
-	case "12h":
-		return 720
-	case "1d":
-		return 1440
-	case "3d":
-		return 4320
-	case "1w":
-		return 10080
-	default:
-		return 0
-	}
-}
-
-// calculateEMA calculates EMA
-func calculateEMA(klines []Kline, period int) float64 {
-	if len(klines) < period {
-		return 0
-	}
-
-	// Calculate SMA as initial EMA
-	sum := 0.0
-	for i := 0; i < period; i++ {
-		sum += klines[i].Close
-	}
-	ema := sum / float64(period)
-
-	// Calculate EMA
-	multiplier := 2.0 / float64(period+1)
-	for i := period; i < len(klines); i++ {
-		ema = (klines[i].Close-ema)*multiplier + ema
-	}
-
-	return ema
-}
-
-// calculateMACD calculates MACD
-func calculateMACD(klines []Kline) float64 {
-	if len(klines) < 26 {
-		return 0
-	}
-
-	// Calculate 12-period and 26-period EMA
-	ema12 := calculateEMA(klines, 12)
-	ema26 := calculateEMA(klines, 26)
-
-	// MACD = EMA12 - EMA26
-	return ema12 - ema26
-}
-
-// calculateRSI calculates RSI
-func calculateRSI(klines []Kline, period int) float64 {
-	if len(klines) <= period {
-		return 0
-	}
-
-	gains := 0.0
-	losses := 0.0
-
-	// Calculate initial average gain/loss
-	for i := 1; i <= period; i++ {
-		change := klines[i].Close - klines[i-1].Close
-		if change > 0 {
-			gains += change
-		} else {
-			losses += -change
-		}
-	}
-
-	avgGain := gains / float64(period)
-	avgLoss := losses / float64(period)
-
-	// Use Wilder smoothing method to calculate subsequent RSI
-	for i := period + 1; i < len(klines); i++ {
-		change := klines[i].Close - klines[i-1].Close
-		if change > 0 {
-			avgGain = (avgGain*float64(period-1) + change) / float64(period)
-			avgLoss = (avgLoss * float64(period-1)) / float64(period)
-		} else {
-			avgGain = (avgGain * float64(period-1)) / float64(period)
-			avgLoss = (avgLoss*float64(period-1) + (-change)) / float64(period)
-		}
-	}
-
-	if avgLoss == 0 {
-		return 100
-	}
-
-	rs := avgGain / avgLoss
-	rsi := 100 - (100 / (1 + rs))
-
-	return rsi
-}
-
-// calculateATR calculates ATR
-func calculateATR(klines []Kline, period int) float64 {
-	if len(klines) <= period {
-		return 0
-	}
-
-	trs := make([]float64, len(klines))
-	for i := 1; i < len(klines); i++ {
-		high := klines[i].High
-		low := klines[i].Low
-		prevClose := klines[i-1].Close
-
-		tr1 := high - low
-		tr2 := math.Abs(high - prevClose)
-		tr3 := math.Abs(low - prevClose)
-
-		trs[i] = math.Max(tr1, math.Max(tr2, tr3))
-	}
-
-	// Calculate initial ATR
-	sum := 0.0
-	for i := 1; i <= period; i++ {
-		sum += trs[i]
-	}
-	atr := sum / float64(period)
-
-	// Wilder smoothing
-	for i := period + 1; i < len(klines); i++ {
-		atr = (atr*float64(period-1) + trs[i]) / float64(period)
-	}
-
-	return atr
-}
-
-// calculateIntradaySeries calculates intraday series data
-func calculateIntradaySeries(klines []Kline) *IntradayData {
-	data := &IntradayData{
-		MidPrices:   make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-		Volume:      make([]float64, 0, 10),
-	}
-
-	// Get latest 10 data points
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i < len(klines); i++ {
-		data.MidPrices = append(data.MidPrices, klines[i].Close)
-		data.Volume = append(data.Volume, klines[i].Volume)
-
-		// Calculate EMA20 for each point
-		if i >= 19 {
-			ema20 := calculateEMA(klines[:i+1], 20)
-			data.EMA20Values = append(data.EMA20Values, ema20)
-		}
-
-		// Calculate MACD for each point
-		if i >= 25 {
-			macd := calculateMACD(klines[:i+1])
-			data.MACDValues = append(data.MACDValues, macd)
-		}
-
-		// Calculate RSI for each point
-		if i >= 7 {
-			rsi7 := calculateRSI(klines[:i+1], 7)
-			data.RSI7Values = append(data.RSI7Values, rsi7)
-		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
-		}
-	}
-
-	// Calculate 3m ATR14
-	data.ATR14 = calculateATR(klines, 14)
-
-	return data
-}
-
-// calculateLongerTermData calculates longer-term data
-func calculateLongerTermData(klines []Kline) *LongerTermData {
-	data := &LongerTermData{
-		MACDValues:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-	}
-
-	// Calculate EMA
-	data.EMA20 = calculateEMA(klines, 20)
-	data.EMA50 = calculateEMA(klines, 50)
-
-	// Calculate ATR
-	data.ATR3 = calculateATR(klines, 3)
-	data.ATR14 = calculateATR(klines, 14)
-
-	// Calculate volume
-	if len(klines) > 0 {
-		data.CurrentVolume = klines[len(klines)-1].Volume
-		// Calculate average volume
-		sum := 0.0
-		for _, k := range klines {
-			sum += k.Volume
-		}
-		data.AverageVolume = sum / float64(len(klines))
-	}
-
-	// Calculate MACD and RSI series
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i < len(klines); i++ {
-		if i >= 25 {
-			macd := calculateMACD(klines[:i+1])
-			data.MACDValues = append(data.MACDValues, macd)
-		}
-		if i >= 14 {
-			rsi14 := calculateRSI(klines[:i+1], 14)
-			data.RSI14Values = append(data.RSI14Values, rsi14)
-		}
-	}
-
-	return data
 }
 
 // getOpenInterestData retrieves OI data
@@ -828,9 +521,65 @@ func formatFloatSlice(values []float64) string {
 	return "[" + strings.Join(strValues, ", ") + "]"
 }
 
-// Normalize normalizes symbol, ensures it's a USDT trading pair
+// xyz dex assets that should NOT get USDT suffix
+var xyzDexAssets = map[string]bool{
+	// Stocks
+	"TSLA": true, "NVDA": true, "AAPL": true, "MSFT": true, "META": true,
+	"AMZN": true, "GOOGL": true, "AMD": true, "COIN": true, "NFLX": true,
+	"PLTR": true, "HOOD": true, "INTC": true, "MSTR": true, "TSM": true,
+	"ORCL": true, "MU": true, "RIVN": true, "COST": true, "LLY": true,
+	"CRCL": true, "SKHX": true, "SNDK": true,
+	// Forex
+	"EUR": true, "JPY": true,
+	// Commodities
+	"GOLD": true, "SILVER": true,
+	// Index
+	"XYZ100": true,
+}
+
+// IsXyzDexAsset checks if a symbol is an xyz dex asset
+func IsXyzDexAsset(symbol string) bool {
+	base := strings.ToUpper(symbol)
+	// Remove any prefix/suffix
+	base = strings.TrimPrefix(base, "XYZ:")
+	for _, suffix := range []string{"USDT", "USD", "-USDC"} {
+		if strings.HasSuffix(base, suffix) {
+			base = strings.TrimSuffix(base, suffix)
+			break
+		}
+	}
+	return xyzDexAssets[base]
+}
+
+// Normalize normalizes symbol
+// For crypto: ensures it's a USDT trading pair
+// For xyz dex assets (stocks, forex, commodities): uses xyz: prefix without USDT suffix
 func Normalize(symbol string) string {
 	symbol = strings.ToUpper(symbol)
+
+	// Check if this is an xyz dex asset
+	if IsXyzDexAsset(symbol) {
+		// Remove any xyz: prefix (case-insensitive) and USDT suffix, then add xyz: prefix
+		base := symbol
+		// Handle both lowercase and uppercase xyz: prefix
+		if strings.HasPrefix(strings.ToLower(base), "xyz:") {
+			base = base[4:] // Remove first 4 characters ("xyz:")
+		}
+		for _, suffix := range []string{"USDT", "USD", "-USDC"} {
+			if strings.HasSuffix(base, suffix) {
+				base = strings.TrimSuffix(base, suffix)
+				break
+			}
+		}
+		return "xyz:" + base
+	}
+
+	// Remove exchange-specific separators (Gate uses BTC_USDT, OKX uses BTC-USDT-SWAP)
+	symbol = strings.ReplaceAll(symbol, "_", "")
+	symbol = strings.ReplaceAll(symbol, "-SWAP", "")
+	symbol = strings.ReplaceAll(symbol, "-", "")
+
+	// For regular crypto assets
 	if strings.HasSuffix(symbol, "USDT") {
 		return symbol
 	}
@@ -853,7 +602,7 @@ func parseFloat(v interface{}) (float64, error) {
 	}
 }
 
-// BuildDataFromKlines constructs market data snapshot from preloaded K-line series (for backtesting/simulation).
+// BuildDataFromKlines constructs market data snapshot from preloaded K-line series.
 func BuildDataFromKlines(symbol string, primary []Kline, longer []Kline) (*Data, error) {
 	if len(primary) == 0 {
 		return nil, fmt.Errorf("primary series is empty")

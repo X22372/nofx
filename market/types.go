@@ -41,6 +41,10 @@ type TimeframeSeriesData struct {
 	RSI14Values []float64  `json:"rsi14_values"` // RSI14 series
 	Volume      []float64  `json:"volume"`       // Volume series (deprecated, use Klines)
 	ATR14       float64    `json:"atr14"`        // ATR14
+	// Bollinger Bands (period 20, std dev multiplier 2)
+	BOLLUpper  []float64 `json:"boll_upper"`  // Upper band
+	BOLLMiddle []float64 `json:"boll_middle"` // Middle band (SMA)
+	BOLLLower  []float64 `json:"boll_lower"`  // Lower band
 }
 
 // OIData Open Interest data
@@ -182,4 +186,77 @@ var config = Config{
 		CheckInterval:     5 * time.Minute,
 	},
 	UpdateInterval: 60, // 1 minute
+}
+
+// BoxData represents multi-period Donchian channel (box) data
+type BoxData struct {
+	// Short-term box (72 1h candles = 3 days)
+	ShortUpper float64 `json:"short_upper"`
+	ShortLower float64 `json:"short_lower"`
+
+	// Mid-term box (240 1h candles = 10 days)
+	MidUpper float64 `json:"mid_upper"`
+	MidLower float64 `json:"mid_lower"`
+
+	// Long-term box (500 1h candles = ~21 days)
+	LongUpper float64 `json:"long_upper"`
+	LongLower float64 `json:"long_lower"`
+
+	// Current price position relative to boxes
+	CurrentPrice float64 `json:"current_price"`
+}
+
+// RegimeLevel represents the ranging classification level
+type RegimeLevel string
+
+const (
+	RegimeLevelNarrow   RegimeLevel = "narrow"   // narrow range oscillation
+	RegimeLevelStandard RegimeLevel = "standard" // standard oscillation
+	RegimeLevelWide     RegimeLevel = "wide"     // wide range oscillation
+	RegimeLevelVolatile RegimeLevel = "volatile" // extreme volatility
+	RegimeLevelTrending RegimeLevel = "trending" // trending
+)
+
+// BreakoutLevel represents which box level has been broken
+type BreakoutLevel string
+
+const (
+	BreakoutNone  BreakoutLevel = "none"
+	BreakoutShort BreakoutLevel = "short"
+	BreakoutMid   BreakoutLevel = "mid"
+	BreakoutLong  BreakoutLevel = "long"
+)
+
+// GridDirection represents the current grid trading direction bias
+type GridDirection string
+
+const (
+	GridDirectionNeutral   GridDirection = "neutral"     // 50% buy + 50% sell
+	GridDirectionLong      GridDirection = "long"        // 100% buy
+	GridDirectionShort     GridDirection = "short"       // 100% sell
+	GridDirectionLongBias  GridDirection = "long_bias"   // 70% buy + 30% sell (default)
+	GridDirectionShortBias GridDirection = "short_bias"  // 30% buy + 70% sell (default)
+)
+
+// GetBuySellRatio returns the buy and sell ratio for this direction
+// biasRatio is the ratio for biased directions (default 0.7 means 70%/30%)
+func (d GridDirection) GetBuySellRatio(biasRatio float64) (buyRatio, sellRatio float64) {
+	if biasRatio <= 0 || biasRatio > 1 {
+		biasRatio = 0.7 // Default 70%/30%
+	}
+
+	switch d {
+	case GridDirectionNeutral:
+		return 0.5, 0.5
+	case GridDirectionLong:
+		return 1.0, 0.0
+	case GridDirectionShort:
+		return 0.0, 1.0
+	case GridDirectionLongBias:
+		return biasRatio, 1.0 - biasRatio
+	case GridDirectionShortBias:
+		return 1.0 - biasRatio, biasRatio
+	default:
+		return 0.5, 0.5
+	}
 }

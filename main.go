@@ -3,18 +3,21 @@ package main
 import (
 	"nofx/api"
 	"nofx/auth"
-	"nofx/backtest"
 	"nofx/config"
 	"nofx/crypto"
+	"nofx/telemetry"
 	"nofx/logger"
 	"nofx/manager"
-	"nofx/market"
-	"nofx/mcp"
+	_ "nofx/mcp/payment"
+	_ "nofx/mcp/provider"
 	"nofx/store"
+	"nofx/telegram"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -26,7 +29,7 @@ func main() {
 	logger.Init(nil)
 
 	logger.Info("╔════════════════════════════════════════════════════════════╗")
-	logger.Info("║    🤖 AI Multi-Model Trading System - DeepSeek & Qwen      ║")
+	logger.Info("║           🚀 NOFX - AI-Powered Trading System              ║")
 	logger.Info("╚════════════════════════════════════════════════════════════╝")
 
 	// Initialize global configuration (loaded from .env)
@@ -34,67 +37,68 @@ func main() {
 	cfg := config.Get()
 	logger.Info("✅ Configuration loaded")
 
-	// Initialize database
-	dbPath := "data.db"
-	if len(os.Args) > 1 {
-		dbPath = os.Args[1]
-	}
-
-	logger.Infof("📋 Initializing database: %s", dbPath)
-	st, err := store.New(dbPath)
-	if err != nil {
-		logger.Fatalf("❌ Failed to initialize database: %v", err)
-	}
-	defer st.Close()
-	backtest.UseDatabase(st.DB())
-
-	// Initialize encryption service
+	// Initialize encryption service BEFORE database (so EncryptedString can decrypt on read)
 	logger.Info("🔐 Initializing encryption service...")
 	cryptoService, err := crypto.NewCryptoService()
 	if err != nil {
 		logger.Fatalf("❌ Failed to initialize encryption service: %v", err)
 	}
-	encryptFunc := func(plaintext string) string {
-		if plaintext == "" {
-			return plaintext
-		}
-		encrypted, err := cryptoService.EncryptForStorage(plaintext)
-		if err != nil {
-			logger.Warnf("⚠️ Encryption failed: %v", err)
-			return plaintext
-		}
-		return encrypted
-	}
-	decryptFunc := func(encrypted string) string {
-		if encrypted == "" {
-			return encrypted
-		}
-		if !cryptoService.IsEncryptedStorageValue(encrypted) {
-			return encrypted
-		}
-		decrypted, err := cryptoService.DecryptFromStorage(encrypted)
-		if err != nil {
-			logger.Warnf("⚠️ Decryption failed: %v", err)
-			return encrypted
-		}
-		return decrypted
-	}
-	st.SetCryptoFuncs(encryptFunc, decryptFunc)
+	crypto.SetGlobalCryptoService(cryptoService)
 	logger.Info("✅ Encryption service initialized successfully")
+
+	// Initialize database from configuration
+	// For backward compatibility: command line arg overrides config (SQLite only)
+	if len(os.Args) > 1 {
+		cfg.DBPath = os.Args[1]
+	}
+	// Ensure data directory exists (for SQLite)
+	if cfg.DBType == "sqlite" {
+		if dir := filepath.Dir(cfg.DBPath); dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				logger.Errorf("Failed to create data directory: %v", err)
+			}
+		}
+	}
+
+	logger.Infof("📋 Initializing database (%s)...", cfg.DBType)
+	dbType := store.DBTypeSQLite
+	if cfg.DBType == "postgres" {
+		dbType = store.DBTypePostgres
+	}
+	st, err := store.NewWithConfig(store.DBConfig{
+		Type:     dbType,
+		Path:     cfg.DBPath,
+		Host:     cfg.DBHost,
+		Port:     cfg.DBPort,
+		User:     cfg.DBUser,
+		Password: cfg.DBPassword,
+		DBName:   cfg.DBName,
+		SSLMode:  cfg.DBSSLMode,
+	})
+	if err != nil {
+		logger.Fatalf("❌ Failed to initialize database: %v", err)
+	}
+	defer st.Close()
+
+	// Initialize installation ID for experience improvement (anonymous statistics)
+	initInstallationID(st)
 
 	// Set JWT secret
 	auth.SetJWTSecret(cfg.JWTSecret)
 	logger.Info("🔑 JWT secret configured")
 
-	// Create TraderManager and BacktestManager
-	traderManager := manager.NewTraderManager()
-	mcpClient := newSharedMCPClient()
-	backtestManager := backtest.NewManager(mcpClient)
-	if err := backtestManager.RestoreRuns(); err != nil {
-		logger.Warnf("⚠️ Failed to restore backtest history: %v", err)
-	}
+	// WebSocket market monitor is NO LONGER USED
+	// All K-line data now comes from CoinAnk API instead of Binance WebSocket cache
+	// Commented out to reduce unnecessary connections:
+	// go market.NewWSMonitor(150).Start(nil)
+	// logger.Info("📊 WebSocket market monitor started")
+	// time.Sleep(500 * time.Millisecond)
+	logger.Info("📊 Using CoinAnk API for all market data (WebSocket cache disabled)")
 
-	// Load all traders from database to memory
+	// Create TraderManager
+	traderManager := manager.NewTraderManager()
+
+	// Load all traders from database to memory (may auto-start traders with IsRunning=true)
 	if err := traderManager.LoadTradersFromStore(st); err != nil {
 		logger.Fatalf("❌ Failed to load traders: %v", err)
 	}
@@ -114,22 +118,31 @@ func main() {
 			if t.IsRunning {
 				status = "✅ Running"
 			}
-			logger.Infof("  • %s [%s] %s - AI Model: %s, Exchange: %s",
-				t.Name, t.ID[:8], status, t.AIModelID, t.ExchangeID)
+			idShort := t.ID
+		if len(idShort) > 8 {
+			idShort = idShort[:8]
+		}
+		logger.Infof("  • %s [%s] %s - AI Model: %s, Exchange: %s",
+				t.Name, idShort, status, t.AIModelID, t.ExchangeID)
 		}
 	}
 
-	// Start WebSocket market monitor (get market data for all USDT perpetual contracts)
-	go market.NewWSMonitor(150).Start(nil)
-	logger.Info("📊 WebSocket market monitor started")
-
 	// Start API server
-	server := api.NewServer(traderManager, st, cryptoService, backtestManager, cfg.APIServerPort)
+	server := api.NewServer(traderManager, st, cryptoService, cfg.APIServerPort)
+
+	// Create hot-reload channel for Telegram bot; wire it to the API server
+	// so that POST /api/telegram can trigger a bot restart when the token changes.
+	telegramReloadCh := make(chan struct{}, 1)
+	server.SetTelegramReloadCh(telegramReloadCh)
+
 	go func() {
 		if err := server.Start(); err != nil {
 			logger.Fatalf("❌ Failed to start API server: %v", err)
 		}
 	}()
+
+	// Start Telegram bot (if TELEGRAM_BOT_TOKEN is configured)
+	go telegram.Start(cfg, st, telegramReloadCh)
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -146,12 +159,26 @@ func main() {
 	logger.Info("✅ System shut down safely")
 }
 
-// newSharedMCPClient creates a shared MCP AI client (for backtesting)
-func newSharedMCPClient() mcp.AIClient {
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	if apiKey == "" {
-		logger.Warn("⚠️ DEEPSEEK_API_KEY not set, AI features will be unavailable")
-		return nil
+// initInstallationID initializes the anonymous installation ID for experience improvement
+// This ID is persisted in database and used for anonymous usage statistics
+func initInstallationID(st *store.Store) {
+	const key = "installation_id"
+
+	// Try to load from database
+	installationID, err := st.GetSystemConfig(key)
+	if err != nil {
+		logger.Warnf("⚠️ Failed to load installation ID: %v", err)
 	}
-	return mcp.NewDeepSeekClient()
+
+	// Generate new ID if not exists
+	if installationID == "" {
+		installationID = uuid.New().String()
+		if err := st.SetSystemConfig(key, installationID); err != nil {
+			logger.Warnf("⚠️ Failed to save installation ID: %v", err)
+		}
+		logger.Infof("📊 Generated new installation ID: %s", installationID[:8]+"...")
+	}
+
+	// Set installation ID in experience module
+	telemetry.SetInstallationID(installationID)
 }

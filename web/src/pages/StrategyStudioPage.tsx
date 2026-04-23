@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 import {
@@ -26,13 +26,21 @@ import {
   Terminal,
   Code,
   Send,
+  Download,
+  Upload,
+  Globe,
 } from 'lucide-react'
-import type { Strategy, StrategyConfig, AIModel } from '../types'
+import type { Strategy, StrategyConfig, AIModel, GridStrategyConfig } from '../types'
 import { confirmToast, notify } from '../lib/notify'
 import { CoinSourceEditor } from '../components/strategy/CoinSourceEditor'
 import { IndicatorEditor } from '../components/strategy/IndicatorEditor'
 import { RiskControlEditor } from '../components/strategy/RiskControlEditor'
 import { PromptSectionsEditor } from '../components/strategy/PromptSectionsEditor'
+import { PublishSettingsEditor } from '../components/strategy/PublishSettingsEditor'
+import { GridConfigEditor, defaultGridConfig } from '../components/strategy/GridConfigEditor'
+import { TokenEstimateBar } from '../components/strategy/TokenEstimateBar'
+import { DeepVoidBackground } from '../components/common/DeepVoidBackground'
+import { t } from '../i18n/translations'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
@@ -45,6 +53,7 @@ export function StrategyStudioPage() {
   const [editingConfig, setEditingConfig] = useState<StrategyConfig | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  const [estimatedTokens, setEstimatedTokens] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
 
@@ -54,11 +63,13 @@ export function StrategyStudioPage() {
 
   // Accordion states for left panel
   const [expandedSections, setExpandedSections] = useState({
+    gridConfig: true,
     coinSource: true,
     indicators: false,
     riskControl: false,
     promptSections: false,
     customPrompt: false,
+    publishSettings: false,
   })
 
   // Right panel states
@@ -83,6 +94,7 @@ export function StrategyStudioPage() {
     duration_ms?: number
   } | null>(null)
   const [isRunningAiTest, setIsRunningAiTest] = useState(false)
+  const gridConfigCacheRef = useRef<Record<string, GridStrategyConfig>>({})
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections((prev) => ({
@@ -100,7 +112,7 @@ export function StrategyStudioPage() {
       })
       if (response.ok) {
         const data = await response.json()
-        // 后端返回的是数组，不是 { models: [] }
+        // Backend returns an array, not { models: [] }
         const allModels = Array.isArray(data) ? data : (data.models || [])
         const enabledModels = allModels.filter((m: AIModel) => m.enabled)
         setAiModels(enabledModels)
@@ -145,6 +157,51 @@ export function StrategyStudioPage() {
     fetchAiModels()
   }, [fetchStrategies, fetchAiModels])
 
+  useEffect(() => {
+    if (!selectedStrategy?.id || !editingConfig?.grid_config) return
+
+    gridConfigCacheRef.current[selectedStrategy.id] = { ...editingConfig.grid_config }
+  }, [selectedStrategy?.id, editingConfig?.grid_config])
+
+  // Track previous language to detect actual changes
+  const prevLanguageRef = useRef(language)
+
+  // When language changes, update prompt sections to match the new language
+  useEffect(() => {
+    const updatePromptSectionsForLanguage = async () => {
+      // Only update if language actually changed (not on initial mount)
+      if (prevLanguageRef.current === language) return
+      prevLanguageRef.current = language
+
+      if (!token) return
+
+      try {
+        // Fetch default config for the new language
+        const response = await fetch(
+          `${API_BASE}/api/strategies/default-config?lang=${language}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+        if (!response.ok) return
+        const defaultConfig = await response.json()
+
+        // Update only the prompt sections and language field
+        setEditingConfig(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            language: language as 'zh' | 'en',
+            prompt_sections: defaultConfig.prompt_sections,
+          }
+        })
+        setHasChanges(true)
+      } catch (err) {
+        console.error('Failed to update prompt sections for language:', err)
+      }
+    }
+
+    updatePromptSectionsForLanguage()
+  }, [language, token]) // Only trigger when language changes
+
   // Create new strategy
   const handleCreateStrategy = async () => {
     if (!token) return
@@ -153,6 +210,7 @@ export function StrategyStudioPage() {
         `${API_BASE}/api/strategies/default-config?lang=${language}`,
         { headers: { Authorization: `Bearer ${token}` } }
       )
+      if (!configResponse.ok) throw new Error('Failed to fetch default config')
       const defaultConfig = await configResponse.json()
 
       const response = await fetch(`${API_BASE}/api/strategies`, {
@@ -162,7 +220,7 @@ export function StrategyStudioPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: language === 'zh' ? '新策略' : 'New Strategy',
+          name: tr('newStrategyName'),
           description: '',
           config: defaultConfig,
         }),
@@ -175,10 +233,12 @@ export function StrategyStudioPage() {
         const now = new Date().toISOString()
         const newStrategy = {
           id: result.id,
-          name: language === 'zh' ? '新策略' : 'New Strategy',
+          name: tr('newStrategyName'),
           description: '',
           is_active: false,
           is_default: false,
+          is_public: false,
+          config_visible: true,
           config: defaultConfig,
           created_at: now,
           updated_at: now,
@@ -195,13 +255,37 @@ export function StrategyStudioPage() {
   // Delete strategy
   const handleDeleteStrategy = async (id: string) => {
     if (!token) return
+    const strategy = strategies.find((item) => item.id === id)
+
+    if (strategy?.is_active) {
+      notify.error(tr('cannotDeleteActiveStrategy'))
+      return
+    }
+
+    // Check if strategy is in use by any trader before showing dialog
+    try {
+      const tradersResp = await fetch(`${API_BASE}/api/my-traders`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (tradersResp.ok) {
+        const traderList = await tradersResp.json()
+        const using = traderList.filter((t: any) => t.strategy_id === id)
+        if (using.length > 0) {
+          const names = using.map((t: any) => t.trader_name).join(', ')
+          notify.error(`Strategy is in use by: ${names}`)
+          return
+        }
+      }
+    } catch {
+      // fetch failed — proceed, backend will guard
+    }
 
     const confirmed = await confirmToast(
-      language === 'zh' ? '确定删除此策略？' : 'Delete this strategy?',
+      tr('confirmDeleteStrategy'),
       {
-        title: language === 'zh' ? '确认删除' : 'Confirm Delete',
-        okText: language === 'zh' ? '删除' : 'Delete',
-        cancelText: language === 'zh' ? '取消' : 'Cancel',
+        title: tr('confirmDelete'),
+        okText: tr('delete'),
+        cancelText: tr('cancel'),
       }
     )
     if (!confirmed) return
@@ -211,9 +295,12 @@ export function StrategyStudioPage() {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       })
-      if (!response.ok) throw new Error('Failed to delete strategy')
-      notify.success(language === 'zh' ? '策略已删除' : 'Strategy deleted')
-      // Clear selection if deleted strategy was selected
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        notify.error(data.error || 'Failed to delete strategy')
+        return
+      }
+      notify.success(tr('strategyDeleted'))
       if (selectedStrategy?.id === id) {
         setSelectedStrategy(null)
         setEditingConfig(null)
@@ -221,9 +308,7 @@ export function StrategyStudioPage() {
       }
       await fetchStrategies()
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMsg)
-      notify.error(errorMsg)
+      notify.error(err instanceof Error ? err.message : 'Unknown error')
     }
   }
 
@@ -238,7 +323,7 @@ export function StrategyStudioPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: language === 'zh' ? '策略副本' : 'Strategy Copy',
+          name: tr('strategyCopy'),
         }),
       })
       if (!response.ok) throw new Error('Failed to duplicate strategy')
@@ -263,11 +348,81 @@ export function StrategyStudioPage() {
     }
   }
 
+  // Export strategy as JSON file
+  const handleExportStrategy = (strategy: Strategy) => {
+    const exportData = {
+      name: strategy.name,
+      description: strategy.description,
+      config: strategy.config,
+      exported_at: new Date().toISOString(),
+      version: '1.0',
+    }
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `strategy_${strategy.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    notify.success(tr('strategyExported'))
+  }
+
+  // Import strategy from JSON file
+  const handleImportStrategy = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file || !token) return
+
+    try {
+      const text = await file.text()
+      const importData = JSON.parse(text)
+
+      // Validate imported data
+      if (!importData.config || !importData.name) {
+        throw new Error(tr('invalidStrategyFile'))
+      }
+
+      // Create new strategy with imported config
+      const response = await fetch(`${API_BASE}/api/strategies`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: `${importData.name} (${tr('imported')})`,
+          description: importData.description || '',
+          config: importData.config,
+        }),
+      })
+      if (!response.ok) throw new Error('Failed to import strategy')
+
+      notify.success(tr('strategyImported'))
+      await fetchStrategies()
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error'
+      notify.error(errorMsg)
+    } finally {
+      // Reset file input
+      event.target.value = ''
+    }
+  }
+
   // Save strategy
   const handleSaveStrategy = async () => {
     if (!token || !selectedStrategy || !editingConfig) return
+    if (estimatedTokens >= 128000 && currentStrategyType === 'ai_trading') {
+      notify.warning(tr('tokenExceedWarning'))
+      // continue with save
+    }
     setIsSaving(true)
     try {
+      // Always sync the config language with the current interface language
+      const configWithLanguage = {
+        ...editingConfig,
+        language: language as 'zh' | 'en',
+      }
       const response = await fetch(
         `${API_BASE}/api/strategies/${selectedStrategy.id}`,
         {
@@ -279,12 +434,15 @@ export function StrategyStudioPage() {
           body: JSON.stringify({
             name: selectedStrategy.name,
             description: selectedStrategy.description,
-            config: editingConfig,
+            config: configWithLanguage,
+            is_public: selectedStrategy.is_public,
+            config_visible: selectedStrategy.config_visible,
           }),
         }
       )
       if (!response.ok) throw new Error('Failed to save strategy')
       setHasChanges(false)
+      notify.success(tr('strategySaved'))
       await fetchStrategies()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -298,11 +456,48 @@ export function StrategyStudioPage() {
     section: K,
     value: StrategyConfig[K]
   ) => {
-    if (!editingConfig) return
-    setEditingConfig({
-      ...editingConfig,
-      [section]: value,
+    setEditingConfig((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        [section]: value,
+      }
     })
+    setHasChanges(true)
+  }
+
+  const handleStrategyTypeChange = (strategyType: NonNullable<StrategyConfig['strategy_type']>) => {
+    if (selectedStrategy?.is_default) return
+
+    const cachedGridConfig = selectedStrategy?.id
+      ? gridConfigCacheRef.current[selectedStrategy.id]
+      : null
+
+    setEditingConfig((prev) => {
+      if (!prev) return prev
+
+      if (strategyType === 'ai_trading') {
+        if (selectedStrategy?.id && prev.grid_config) {
+          gridConfigCacheRef.current[selectedStrategy.id] = { ...prev.grid_config }
+        }
+
+        return {
+          ...prev,
+          strategy_type: 'ai_trading',
+          // Use null so the field is preserved in JSON and backend merge can actually clear it.
+          grid_config: null,
+        }
+      }
+
+      return {
+        ...prev,
+        strategy_type: 'grid_trading',
+        grid_config: cachedGridConfig ?? prev.grid_config ?? { ...defaultGridConfig },
+      }
+    })
+
+    setPromptPreview(null)
+    setAiTestResult(null)
     setHasChanges(true)
   }
 
@@ -364,44 +559,7 @@ export function StrategyStudioPage() {
     }
   }
 
-  const t = (key: string) => {
-    const translations: Record<string, Record<string, string>> = {
-      strategyStudio: { zh: '策略工作室', en: 'Strategy Studio' },
-      subtitle: { zh: '可视化配置和测试交易策略', en: 'Configure and test trading strategies' },
-      strategies: { zh: '策略', en: 'Strategies' },
-      newStrategy: { zh: '新建', en: 'New' },
-      coinSource: { zh: '币种来源', en: 'Coin Source' },
-      indicators: { zh: '技术指标', en: 'Indicators' },
-      riskControl: { zh: '风控参数', en: 'Risk Control' },
-      promptSections: { zh: 'Prompt 编辑', en: 'Prompt Editor' },
-      customPrompt: { zh: '附加提示', en: 'Extra Prompt' },
-      save: { zh: '保存', en: 'Save' },
-      saving: { zh: '保存中...', en: 'Saving...' },
-      activate: { zh: '激活', en: 'Activate' },
-      active: { zh: '激活中', en: 'Active' },
-      default: { zh: '默认', en: 'Default' },
-      promptPreview: { zh: 'Prompt 预览', en: 'Prompt Preview' },
-      aiTestRun: { zh: 'AI 测试', en: 'AI Test' },
-      systemPrompt: { zh: 'System Prompt', en: 'System Prompt' },
-      userPrompt: { zh: 'User Prompt', en: 'User Prompt' },
-      loadPrompt: { zh: '生成 Prompt', en: 'Generate Prompt' },
-      refreshPrompt: { zh: '刷新', en: 'Refresh' },
-      promptVariant: { zh: '风格', en: 'Style' },
-      balanced: { zh: '平衡', en: 'Balanced' },
-      aggressive: { zh: '激进', en: 'Aggressive' },
-      conservative: { zh: '保守', en: 'Conservative' },
-      selectModel: { zh: '选择 AI 模型', en: 'Select AI Model' },
-      runTest: { zh: '运行 AI 测试', en: 'Run AI Test' },
-      running: { zh: '运行中...', en: 'Running...' },
-      aiOutput: { zh: 'AI 输出', en: 'AI Output' },
-      reasoning: { zh: '思维链', en: 'Reasoning' },
-      decisions: { zh: '决策', en: 'Decisions' },
-      duration: { zh: '耗时', en: 'Duration' },
-      noModel: { zh: '请先配置 AI 模型', en: 'Please configure AI model first' },
-      testNote: { zh: '使用真实 AI 模型测试，不执行交易', en: 'Test with real AI, no trading' },
-    }
-    return translations[key]?.[language] || key
-  }
+  const tr = (key: string) => t(`strategyStudio.${key}`, language)
 
   if (isLoading) {
     return (
@@ -416,12 +574,33 @@ export function StrategyStudioPage() {
     )
   }
 
+  // Get current strategy type (default to ai_trading if not set)
+  const currentStrategyType = editingConfig?.strategy_type || 'ai_trading'
+
   const configSections = [
+    // Grid Config - only for grid_trading
+    {
+      key: 'gridConfig' as const,
+      icon: Activity,
+      color: '#0ECB81',
+      title: tr('gridConfig'),
+      forStrategyType: 'grid_trading' as const,
+      content: editingConfig?.grid_config && (
+        <GridConfigEditor
+          config={editingConfig.grid_config}
+          onChange={(gridConfig) => updateConfig('grid_config', gridConfig)}
+          disabled={selectedStrategy?.is_default}
+          language={language}
+        />
+      ),
+    },
+    // AI Trading sections
     {
       key: 'coinSource' as const,
       icon: Target,
       color: '#F0B90B',
-      title: t('coinSource'),
+      title: tr('coinSource'),
+      forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
         <CoinSourceEditor
           config={editingConfig.coin_source}
@@ -435,7 +614,8 @@ export function StrategyStudioPage() {
       key: 'indicators' as const,
       icon: BarChart3,
       color: '#0ECB81',
-      title: t('indicators'),
+      title: tr('indicators'),
+      forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
         <IndicatorEditor
           config={editingConfig.indicators}
@@ -449,7 +629,8 @@ export function StrategyStudioPage() {
       key: 'riskControl' as const,
       icon: Shield,
       color: '#F6465D',
-      title: t('riskControl'),
+      title: tr('riskControl'),
+      forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
         <RiskControlEditor
           config={editingConfig.risk_control}
@@ -463,7 +644,8 @@ export function StrategyStudioPage() {
       key: 'promptSections' as const,
       icon: FileText,
       color: '#a855f7',
-      title: t('promptSections'),
+      title: tr('promptSections'),
+      forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
         <PromptSectionsEditor
           config={editingConfig.prompt_sections}
@@ -477,41 +659,69 @@ export function StrategyStudioPage() {
       key: 'customPrompt' as const,
       icon: Settings,
       color: '#60a5fa',
-      title: t('customPrompt'),
+      title: tr('customPrompt'),
+      forStrategyType: 'ai_trading' as const,
       content: editingConfig && (
         <div>
           <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
-            {language === 'zh' ? '附加在 System Prompt 末尾的额外提示，用于补充个性化交易风格' : 'Extra prompt appended to System Prompt for personalized trading style'}
+            {tr('customPromptDesc')}
           </p>
           <textarea
             value={editingConfig.custom_prompt || ''}
             onChange={(e) => updateConfig('custom_prompt', e.target.value)}
             disabled={selectedStrategy?.is_default}
-            placeholder={language === 'zh' ? '输入自定义提示词...' : 'Enter custom prompt...'}
+            placeholder={tr('customPromptPlaceholder')}
             className="w-full h-32 px-3 py-2 rounded-lg resize-none font-mono text-xs"
             style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
           />
         </div>
       ),
     },
-  ]
+    {
+      key: 'publishSettings' as const,
+      icon: Globe,
+      color: '#0ECB81',
+      title: tr('publishSettings'),
+      forStrategyType: 'both' as const,
+      content: selectedStrategy && (
+        <PublishSettingsEditor
+          isPublic={selectedStrategy.is_public ?? false}
+          configVisible={selectedStrategy.config_visible ?? true}
+          onIsPublicChange={(value) => {
+            setSelectedStrategy({ ...selectedStrategy, is_public: value })
+            setHasChanges(true)
+          }}
+          onConfigVisibleChange={(value) => {
+            setSelectedStrategy({ ...selectedStrategy, config_visible: value })
+            setHasChanges(true)
+          }}
+          disabled={selectedStrategy?.is_default}
+          language={language}
+        />
+      ),
+    },
+  ].filter(section =>
+    section.forStrategyType === 'both' || section.forStrategyType === currentStrategyType
+  )
 
   return (
-    <div className="h-[calc(100vh-64px)] flex flex-col" style={{ background: '#0B0E11' }}>
+    <DeepVoidBackground className="h-[calc(100vh-64px)] flex flex-col bg-nofx-bg relative overflow-hidden">
+
       {/* Header */}
-      <div className="flex-shrink-0 px-4 py-3 border-b" style={{ borderColor: '#2B3139' }}>
+      {/* Header */}
+      <div className="flex-shrink-0 px-4 py-3 border-b border-nofx-gold/20 bg-nofx-bg/60 backdrop-blur-md z-10">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg" style={{ background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)' }}>
+            <div className="p-2 rounded-lg bg-gradient-to-br from-nofx-gold to-yellow-500">
               <Sparkles className="w-5 h-5 text-black" />
             </div>
             <div>
-              <h1 className="text-lg font-bold" style={{ color: '#EAECEF' }}>{t('strategyStudio')}</h1>
-              <p className="text-xs" style={{ color: '#848E9C' }}>{t('subtitle')}</p>
+              <h1 className="text-lg font-bold text-nofx-text">{tr('title')}</h1>
+              <p className="text-xs text-nofx-text-muted">{tr('subtitle')}</p>
             </div>
           </div>
           {error && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs" style={{ background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }}>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs bg-nofx-danger/10 text-nofx-danger">
               {error}
               <button onClick={() => setError(null)} className="hover:underline">×</button>
             </div>
@@ -522,19 +732,31 @@ export function StrategyStudioPage() {
       {/* Main Content - Three Columns */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Column - Strategy List */}
-        <div className="w-48 flex-shrink-0 border-r overflow-y-auto" style={{ borderColor: '#2B3139' }}>
+        <div className="w-48 flex-shrink-0 border-r border-nofx-gold/20 overflow-y-auto bg-nofx-bg/30 backdrop-blur-sm z-10">
           <div className="p-2">
             <div className="flex items-center justify-between mb-2 px-2">
-              <span className="text-xs font-medium" style={{ color: '#848E9C' }}>{t('strategies')}</span>
-              <button
-                onClick={handleCreateStrategy}
-                className="p-1 rounded hover:bg-white/10 transition-colors"
-                style={{ color: '#F0B90B' }}
-              >
-                <Plus className="w-4 h-4" />
-              </button>
+              <span className="text-xs font-medium text-nofx-text-muted">{tr('strategies')}</span>
+              <div className="flex items-center gap-1">
+                {/* Import button with hidden file input */}
+                <label className="p-1 rounded hover:bg-white/10 transition-colors cursor-pointer text-nofx-text-muted hover:text-white" title={tr('importStrategy')}>
+                  <Upload className="w-4 h-4" />
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportStrategy}
+                    className="hidden"
+                  />
+                </label>
+                <button
+                  onClick={handleCreateStrategy}
+                  className="p-1 rounded hover:bg-white/10 transition-colors text-nofx-gold"
+                  title={tr('newStrategyTooltip')}
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-            <div className="space-y-1">
+            <div className="space-y-2">
               {strategies.map((strategy) => (
                 <div
                   key={strategy.id}
@@ -545,41 +767,57 @@ export function StrategyStudioPage() {
                     setPromptPreview(null)
                     setAiTestResult(null)
                   }}
-                  className={`group px-2 py-2 rounded-lg cursor-pointer transition-all ${
-                    selectedStrategy?.id === strategy.id ? 'ring-1 ring-yellow-500/50' : 'hover:bg-white/5'
-                  }`}
-                  style={{
-                    background: selectedStrategy?.id === strategy.id ? 'rgba(240, 185, 11, 0.1)' : 'transparent',
-                  }}
+                  className={`group px-2 py-2 rounded-lg cursor-pointer transition-all ${selectedStrategy?.id === strategy.id
+                    ? 'ring-1 ring-nofx-gold/50 bg-nofx-gold/10 shadow-[0_0_15px_rgba(240,185,11,0.1)]'
+                    : 'hover:bg-nofx-bg-lighter/60 ring-1 ring-white/10 hover:ring-nofx-gold/20 bg-transparent'
+                    }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm truncate" style={{ color: '#EAECEF' }}>{strategy.name}</span>
-                    {!strategy.is_default && (
-                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDuplicateStrategy(strategy.id) }}
-                          className="p-1 rounded hover:bg-white/10"
-                        >
-                          <Copy className="w-3 h-3" style={{ color: '#848E9C' }} />
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDeleteStrategy(strategy.id) }}
-                          className="p-1 rounded hover:bg-red-500/20"
-                        >
-                          <Trash2 className="w-3 h-3" style={{ color: '#F6465D' }} />
-                        </button>
-                      </div>
-                    )}
+                  <div className="flex items-start justify-between">
+                    <span className={`line-clamp-2 text-nofx-text ${language === 'zh' ? 'text-sm' : 'text-xs'}`}>{strategy.name}</span>
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleExportStrategy(strategy) }}
+                        className="p-1 rounded hover:bg-white/10 text-nofx-text-muted hover:text-white"
+                        title={tr('export')}
+                      >
+                        <Download className="w-3 h-3" />
+                      </button>
+                      {!strategy.is_default && (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDuplicateStrategy(strategy.id) }}
+                            className="p-1 rounded hover:bg-white/10 text-nofx-text-muted hover:text-white"
+                            title={tr('duplicate')}
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteStrategy(strategy.id) }}
+                            disabled={strategy.is_active}
+                            className="p-1 rounded hover:bg-nofx-danger/20 text-nofx-danger disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                            title={strategy.is_active ? tr('cannotDeleteActiveStrategy') : tr('deleteTooltip')}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1 mt-1">
+                  <div className="flex items-center gap-1 mt-1 flex-wrap">
                     {strategy.is_active && (
-                      <span className="px-1.5 py-0.5 text-[10px] rounded" style={{ background: 'rgba(14, 203, 129, 0.15)', color: '#0ECB81' }}>
-                        {t('active')}
+                      <span className="px-1.5 py-0.5 text-[10px] rounded bg-nofx-success/15 text-nofx-success">
+                        {tr('active')}
                       </span>
                     )}
                     {strategy.is_default && (
-                      <span className="px-1.5 py-0.5 text-[10px] rounded" style={{ background: 'rgba(240, 185, 11, 0.15)', color: '#F0B90B' }}>
-                        {t('default')}
+                      <span className="px-1.5 py-0.5 text-[10px] rounded bg-nofx-gold/15 text-nofx-gold">
+                        {tr('default')}
+                      </span>
+                    )}
+                    {strategy.is_public && (
+                      <span className="px-1.5 py-0.5 text-[10px] rounded flex items-center gap-0.5 bg-blue-400/15 text-blue-400">
+                        <Globe className="w-2.5 h-2.5" />
+                        {tr('public')}
                       </span>
                     )}
                   </div>
@@ -590,7 +828,7 @@ export function StrategyStudioPage() {
         </div>
 
         {/* Middle Column - Config Editor */}
-        <div className="flex-1 min-w-0 overflow-y-auto border-r" style={{ borderColor: '#2B3139' }}>
+        <div className="flex-1 min-w-0 overflow-y-auto border-r border-nofx-gold/20">
           {selectedStrategy && editingConfig ? (
             <div className="p-4">
               {/* Strategy Name & Actions */}
@@ -604,48 +842,102 @@ export function StrategyStudioPage() {
                       setHasChanges(true)
                     }}
                     disabled={selectedStrategy.is_default}
-                    className="text-lg font-bold bg-transparent border-none outline-none w-full"
-                    style={{ color: '#EAECEF' }}
+                    className="text-lg font-bold bg-transparent border-none outline-none w-full text-nofx-text placeholder-nofx-text-muted"
+                  />
+                  <input
+                    type="text"
+                    value={selectedStrategy.description || ''}
+                    onChange={(e) => {
+                      setSelectedStrategy({ ...selectedStrategy, description: e.target.value })
+                      setHasChanges(true)
+                    }}
+                    disabled={selectedStrategy.is_default}
+                    placeholder={tr('addDescription')}
+                    className="text-xs bg-transparent border-none outline-none w-full text-nofx-text-muted placeholder-nofx-text-muted/50 mt-1"
                   />
                   {hasChanges && (
-                    <span className="text-xs" style={{ color: '#F0B90B' }}>● 未保存</span>
+                    <span className="text-xs text-nofx-gold">● {tr('unsaved')}</span>
                   )}
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {!selectedStrategy.is_active && (
                     <button
                       onClick={() => handleActivateStrategy(selectedStrategy.id)}
-                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs transition-colors"
-                      style={{ background: 'rgba(14, 203, 129, 0.1)', border: '1px solid rgba(14, 203, 129, 0.3)', color: '#0ECB81' }}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs transition-colors bg-nofx-success/10 border border-nofx-success/30 text-nofx-success hover:bg-nofx-success/20"
                     >
                       <Check className="w-3 h-3" />
-                      {t('activate')}
+                      {tr('activate')}
                     </button>
                   )}
                   {!selectedStrategy.is_default && (
                     <button
                       onClick={handleSaveStrategy}
                       disabled={isSaving || !hasChanges}
-                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
-                      style={{
-                        background: hasChanges ? '#F0B90B' : '#2B3139',
-                        color: hasChanges ? '#0B0E11' : '#848E9C',
-                      }}
+                      className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50
+                        ${hasChanges ? 'bg-nofx-gold text-black hover:bg-yellow-500' : 'bg-nofx-bg-lighter text-nofx-text-muted cursor-not-allowed'}`}
                     >
                       <Save className="w-3 h-3" />
-                      {isSaving ? t('saving') : t('save')}
+                      {isSaving ? tr('saving') : tr('save')}
                     </button>
                   )}
                 </div>
               </div>
+
+              {/* Token Estimate Bar */}
+              {currentStrategyType === 'ai_trading' && (
+                <div className="mb-4">
+                  <TokenEstimateBar config={editingConfig} language={language} onTokenCountChange={setEstimatedTokens} />
+                </div>
+              )}
+
+              {/* Strategy Type Selector */}
+              {editingConfig && (
+                <div className="mb-4 p-4 rounded-lg bg-nofx-bg-lighter border border-nofx-gold/20">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Zap className="w-4 h-4" style={{ color: '#F0B90B' }} />
+                    <span className="text-sm font-medium text-nofx-text">{tr('strategyType')}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => handleStrategyTypeChange('ai_trading')}
+                      disabled={selectedStrategy?.is_default}
+                      className={`p-3 rounded-lg border transition-all ${
+                        (!editingConfig.strategy_type || editingConfig.strategy_type === 'ai_trading')
+                          ? 'border-nofx-gold bg-nofx-gold/10'
+                          : 'border-nofx-border hover:border-nofx-gold/50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <Bot className="w-4 h-4" style={{ color: '#F0B90B' }} />
+                        <span className="text-sm font-medium text-nofx-text">{tr('aiTrading')}</span>
+                      </div>
+                      <p className="text-xs text-nofx-text-muted text-left">{tr('aiTradingDesc')}</p>
+                    </button>
+                    <button
+                      onClick={() => handleStrategyTypeChange('grid_trading')}
+                      disabled={selectedStrategy?.is_default}
+                      className={`p-3 rounded-lg border transition-all ${
+                        editingConfig.strategy_type === 'grid_trading'
+                          ? 'border-nofx-gold bg-nofx-gold/10'
+                          : 'border-nofx-border hover:border-nofx-gold/50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <Activity className="w-4 h-4" style={{ color: '#0ECB81' }} />
+                        <span className="text-sm font-medium text-nofx-text">{tr('gridTrading')}</span>
+                      </div>
+                      <p className="text-xs text-nofx-text-muted text-left">{tr('gridTradingDesc')}</p>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Config Sections */}
               <div className="space-y-2">
                 {configSections.map(({ key, icon: Icon, color, title, content }) => (
                   <div
                     key={key}
-                    className="rounded-lg overflow-hidden"
-                    style={{ background: '#1E2329', border: '1px solid #2B3139' }}
+                    className="rounded-lg overflow-hidden bg-nofx-bg-lighter border border-nofx-gold/20"
                   >
                     <button
                       onClick={() => toggleSection(key)}
@@ -653,12 +945,12 @@ export function StrategyStudioPage() {
                     >
                       <div className="flex items-center gap-2">
                         <Icon className="w-4 h-4" style={{ color }} />
-                        <span className="text-sm font-medium" style={{ color: '#EAECEF' }}>{title}</span>
+                        <span className="text-sm font-medium text-nofx-text">{title}</span>
                       </div>
                       {expandedSections[key] ? (
-                        <ChevronDown className="w-4 h-4" style={{ color: '#848E9C' }} />
+                        <ChevronDown className="w-4 h-4 text-nofx-text-muted" />
                       ) : (
-                        <ChevronRight className="w-4 h-4" style={{ color: '#848E9C' }} />
+                        <ChevronRight className="w-4 h-4 text-nofx-text-muted" />
                       )}
                     </button>
                     {expandedSections[key] && (
@@ -673,9 +965,9 @@ export function StrategyStudioPage() {
           ) : (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
-                <Activity className="w-12 h-12 mx-auto mb-2 opacity-30" style={{ color: '#848E9C' }} />
-                <p className="text-sm" style={{ color: '#848E9C' }}>
-                  {language === 'zh' ? '选择或创建策略' : 'Select or create a strategy'}
+                <Activity className="w-12 h-12 mx-auto mb-2 opacity-30 text-nofx-text-muted" />
+                <p className="text-sm text-nofx-text-muted">
+                  {tr('selectOrCreate')}
                 </p>
               </div>
             </div>
@@ -685,32 +977,22 @@ export function StrategyStudioPage() {
         {/* Right Column - Prompt Preview & AI Test */}
         <div className="w-[420px] flex-shrink-0 flex flex-col overflow-hidden">
           {/* Tabs */}
-          <div className="flex-shrink-0 flex border-b" style={{ borderColor: '#2B3139' }}>
+          <div className="flex-shrink-0 flex border-b border-nofx-gold/20">
             <button
               onClick={() => setActiveRightTab('prompt')}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                activeRightTab === 'prompt' ? 'border-b-2' : 'opacity-60 hover:opacity-100'
-              }`}
-              style={{
-                borderColor: activeRightTab === 'prompt' ? '#a855f7' : 'transparent',
-                color: activeRightTab === 'prompt' ? '#a855f7' : '#848E9C',
-              }}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${activeRightTab === 'prompt' ? 'border-b-2 border-purple-500 text-purple-500' : 'opacity-60 hover:opacity-100 text-nofx-text-muted'
+                }`}
             >
               <Eye className="w-4 h-4" />
-              {t('promptPreview')}
+              {tr('promptPreview')}
             </button>
             <button
               onClick={() => setActiveRightTab('test')}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                activeRightTab === 'test' ? 'border-b-2' : 'opacity-60 hover:opacity-100'
-              }`}
-              style={{
-                borderColor: activeRightTab === 'test' ? '#22c55e' : 'transparent',
-                color: activeRightTab === 'test' ? '#22c55e' : '#848E9C',
-              }}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${activeRightTab === 'test' ? 'border-b-2 border-green-500 text-green-500' : 'opacity-60 hover:opacity-100 text-nofx-text-muted'
+                }`}
             >
               <Play className="w-4 h-4" />
-              {t('aiTestRun')}
+              {tr('aiTestRun')}
             </button>
           </div>
 
@@ -724,37 +1006,35 @@ export function StrategyStudioPage() {
                   <select
                     value={selectedVariant}
                     onChange={(e) => setSelectedVariant(e.target.value)}
-                    className="px-2 py-1.5 rounded text-xs"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                    className="px-2 py-1.5 rounded text-xs bg-nofx-bg border border-nofx-gold/20 text-nofx-text outline-none focus:border-nofx-gold"
                   >
-                    <option value="balanced">{t('balanced')}</option>
-                    <option value="aggressive">{t('aggressive')}</option>
-                    <option value="conservative">{t('conservative')}</option>
+                    <option value="balanced">{tr('balanced')}</option>
+                    <option value="aggressive">{tr('aggressive')}</option>
+                    <option value="conservative">{tr('conservative')}</option>
                   </select>
                   <button
                     onClick={fetchPromptPreview}
                     disabled={isLoadingPrompt || !editingConfig}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-50"
-                    style={{ background: '#a855f7', color: '#fff' }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-50 bg-purple-600 hover:bg-purple-700 text-white"
                   >
                     {isLoadingPrompt ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                    {promptPreview ? t('refreshPrompt') : t('loadPrompt')}
+                    {promptPreview ? tr('refreshPrompt') : tr('loadPrompt')}
                   </button>
                 </div>
 
                 {promptPreview ? (
                   <>
                     {/* Config Summary */}
-                    <div className="p-2 rounded-lg" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+                    <div className="p-2 rounded-lg bg-nofx-bg border border-nofx-gold/20">
                       <div className="flex items-center gap-1.5 mb-2">
-                        <Code className="w-3 h-3" style={{ color: '#a855f7' }} />
-                        <span className="text-xs font-medium" style={{ color: '#a855f7' }}>Config</span>
+                        <Code className="w-3 h-3 text-purple-500" />
+                        <span className="text-xs font-medium text-purple-500">Config</span>
                       </div>
                       <div className="grid grid-cols-3 gap-2 text-xs">
                         {Object.entries(promptPreview.config_summary || {}).map(([key, value]) => (
                           <div key={key}>
-                            <div style={{ color: '#848E9C' }}>{key.replace(/_/g, ' ')}</div>
-                            <div style={{ color: '#EAECEF' }}>{String(value)}</div>
+                            <div className="text-nofx-text-muted">{key.replace(/_/g, ' ')}</div>
+                            <div className="text-nofx-text">{String(value)}</div>
                           </div>
                         ))}
                       </div>
@@ -764,25 +1044,25 @@ export function StrategyStudioPage() {
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
                         <div className="flex items-center gap-1.5">
-                          <FileText className="w-3 h-3" style={{ color: '#a855f7' }} />
-                          <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('systemPrompt')}</span>
+                          <FileText className="w-3 h-3 text-purple-500" />
+                          <span className="text-xs font-medium text-nofx-text">{tr('systemPrompt')}</span>
                         </div>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: '#2B3139', color: '#848E9C' }}>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-nofx-bg-lighter text-nofx-text-muted">
                           {promptPreview.system_prompt.length.toLocaleString()} chars
                         </span>
                       </div>
                       <pre
-                        className="p-2 rounded-lg text-[11px] font-mono overflow-auto"
-                        style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF', maxHeight: '400px' }}
+                        className="p-2 rounded-lg text-[11px] font-mono overflow-auto bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
+                        style={{ maxHeight: '400px' }}
                       >
                         {promptPreview.system_prompt}
                       </pre>
                     </div>
                   </>
                 ) : (
-                  <div className="flex flex-col items-center justify-center py-12" style={{ color: '#848E9C' }}>
+                  <div className="flex flex-col items-center justify-center py-12 text-nofx-text-muted">
                     <Eye className="w-10 h-10 mb-2 opacity-30" />
-                    <p className="text-sm">{language === 'zh' ? '点击生成 Prompt 预览' : 'Click to generate prompt preview'}</p>
+                    <p className="text-sm">{tr('generatePromptPreview')}</p>
                   </div>
                 )}
               </div>
@@ -792,15 +1072,14 @@ export function StrategyStudioPage() {
                 {/* Controls */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <Bot className="w-4 h-4" style={{ color: '#22c55e' }} />
-                    <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('selectModel')}</span>
+                    <Bot className="w-4 h-4 text-green-500" />
+                    <span className="text-xs font-medium text-nofx-text">{tr('selectModel')}</span>
                   </div>
                   {aiModels.length > 0 ? (
                     <select
                       value={selectedModelId}
                       onChange={(e) => setSelectedModelId(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg text-sm"
-                      style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                      className="w-full px-3 py-2 rounded-lg text-sm bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
                     >
                       {aiModels.map((model) => (
                         <option key={model.id} value={model.id}>
@@ -809,8 +1088,8 @@ export function StrategyStudioPage() {
                       ))}
                     </select>
                   ) : (
-                    <div className="px-3 py-2 rounded-lg text-sm" style={{ background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }}>
-                      {t('noModel')}
+                    <div className="px-3 py-2 rounded-lg text-sm bg-nofx-danger/10 text-nofx-danger">
+                      {tr('noModel')}
                     </div>
                   )}
 
@@ -818,53 +1097,47 @@ export function StrategyStudioPage() {
                     <select
                       value={selectedVariant}
                       onChange={(e) => setSelectedVariant(e.target.value)}
-                      className="px-2 py-1.5 rounded text-xs"
-                      style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+                      className="px-2 py-1.5 rounded text-xs bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
                     >
-                      <option value="balanced">{t('balanced')}</option>
-                      <option value="aggressive">{t('aggressive')}</option>
-                      <option value="conservative">{t('conservative')}</option>
+                      <option value="balanced">{tr('balanced')}</option>
+                      <option value="aggressive">{tr('aggressive')}</option>
+                      <option value="conservative">{tr('conservative')}</option>
                     </select>
                     <button
                       onClick={runAiTest}
                       disabled={isRunningAiTest || !editingConfig || !selectedModelId}
-                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
-                      style={{
-                        background: 'linear-gradient(135deg, #22c55e 0%, #4ade80 100%)',
-                        color: '#fff',
-                        boxShadow: '0 4px 12px rgba(34, 197, 94, 0.3)',
-                      }}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 text-white shadow-lg shadow-green-500/20 bg-gradient-to-br from-green-500 to-green-600"
                     >
                       {isRunningAiTest ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          {t('running')}
+                          {tr('running')}
                         </>
                       ) : (
                         <>
                           <Send className="w-4 h-4" />
-                          {t('runTest')}
+                          {tr('runTest')}
                         </>
                       )}
                     </button>
                   </div>
-                  <p className="text-[10px]" style={{ color: '#848E9C' }}>{t('testNote')}</p>
+                  <p className="text-[10px] text-nofx-text-muted">{tr('testNote')}</p>
                 </div>
 
                 {/* Test Results */}
                 {aiTestResult ? (
                   <div className="space-y-3">
                     {aiTestResult.error ? (
-                      <div className="p-3 rounded-lg" style={{ background: 'rgba(246, 70, 93, 0.1)', border: '1px solid rgba(246, 70, 93, 0.3)' }}>
-                        <p className="text-sm" style={{ color: '#F6465D' }}>{aiTestResult.error}</p>
+                      <div className="p-3 rounded-lg bg-nofx-danger/10 border border-nofx-danger/30">
+                        <p className="text-sm text-nofx-danger">{aiTestResult.error}</p>
                       </div>
                     ) : (
                       <>
                         {aiTestResult.duration_ms && (
                           <div className="flex items-center gap-2">
-                            <Clock className="w-3 h-3" style={{ color: '#848E9C' }} />
-                            <span className="text-xs" style={{ color: '#848E9C' }}>
-                              {t('duration')}: {(aiTestResult.duration_ms / 1000).toFixed(2)}s
+                            <Clock className="w-3 h-3 text-nofx-text-muted" />
+                            <span className="text-xs text-nofx-text-muted">
+                              {tr('duration')}: {(aiTestResult.duration_ms / 1000).toFixed(2)}s
                             </span>
                           </div>
                         )}
@@ -873,12 +1146,12 @@ export function StrategyStudioPage() {
                         {aiTestResult.user_prompt && (
                           <div>
                             <div className="flex items-center gap-1.5 mb-1.5">
-                              <Terminal className="w-3 h-3" style={{ color: '#60a5fa' }} />
-                              <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('userPrompt')} (Input)</span>
+                              <Terminal className="w-3 h-3 text-blue-400" />
+                              <span className="text-xs font-medium text-nofx-text">{tr('userPrompt')} (Input)</span>
                             </div>
                             <pre
-                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto"
-                              style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF', maxHeight: '200px' }}
+                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
+                              style={{ maxHeight: '200px' }}
                             >
                               {aiTestResult.user_prompt}
                             </pre>
@@ -889,12 +1162,12 @@ export function StrategyStudioPage() {
                         {aiTestResult.reasoning && (
                           <div>
                             <div className="flex items-center gap-1.5 mb-1.5">
-                              <Sparkles className="w-3 h-3" style={{ color: '#F0B90B' }} />
-                              <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('reasoning')}</span>
+                              <Sparkles className="w-3 h-3 text-nofx-gold" />
+                              <span className="text-xs font-medium text-nofx-text">{tr('reasoning')}</span>
                             </div>
                             <pre
-                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto whitespace-pre-wrap"
-                              style={{ background: '#0B0E11', border: '1px solid rgba(240, 185, 11, 0.3)', color: '#EAECEF', maxHeight: '200px' }}
+                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto whitespace-pre-wrap bg-nofx-bg border border-nofx-gold/30 text-nofx-text"
+                              style={{ maxHeight: '200px' }}
                             >
                               {aiTestResult.reasoning}
                             </pre>
@@ -905,12 +1178,12 @@ export function StrategyStudioPage() {
                         {aiTestResult.decisions && aiTestResult.decisions.length > 0 && (
                           <div>
                             <div className="flex items-center gap-1.5 mb-1.5">
-                              <Activity className="w-3 h-3" style={{ color: '#22c55e' }} />
-                              <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('decisions')}</span>
+                              <Activity className="w-3 h-3 text-green-500" />
+                              <span className="text-xs font-medium text-nofx-text">{tr('decisions')}</span>
                             </div>
                             <pre
-                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto"
-                              style={{ background: '#0B0E11', border: '1px solid rgba(34, 197, 94, 0.3)', color: '#EAECEF', maxHeight: '200px' }}
+                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto bg-nofx-bg border border-green-500/30 text-nofx-text"
+                              style={{ maxHeight: '200px' }}
                             >
                               {JSON.stringify(aiTestResult.decisions, null, 2)}
                             </pre>
@@ -921,12 +1194,12 @@ export function StrategyStudioPage() {
                         {aiTestResult.ai_response && (
                           <div>
                             <div className="flex items-center gap-1.5 mb-1.5">
-                              <FileText className="w-3 h-3" style={{ color: '#848E9C' }} />
-                              <span className="text-xs font-medium" style={{ color: '#EAECEF' }}>{t('aiOutput')} (Raw)</span>
+                              <FileText className="w-3 h-3 text-nofx-text-muted" />
+                              <span className="text-xs font-medium text-nofx-text">{tr('aiOutput')} (Raw)</span>
                             </div>
                             <pre
-                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto whitespace-pre-wrap"
-                              style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF', maxHeight: '300px' }}
+                              className="p-2 rounded-lg text-[10px] font-mono overflow-auto whitespace-pre-wrap bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
+                              style={{ maxHeight: '300px' }}
                             >
                               {aiTestResult.ai_response}
                             </pre>
@@ -936,9 +1209,9 @@ export function StrategyStudioPage() {
                     )}
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center py-12" style={{ color: '#848E9C' }}>
+                  <div className="flex flex-col items-center justify-center py-12 text-nofx-text-muted">
                     <Play className="w-10 h-10 mb-2 opacity-30" />
-                    <p className="text-sm">{language === 'zh' ? '点击运行 AI 测试' : 'Click to run AI test'}</p>
+                    <p className="text-sm">{tr('runAiTestHint')}</p>
                   </div>
                 )}
               </div>
@@ -946,7 +1219,7 @@ export function StrategyStudioPage() {
           </div>
         </div>
       </div>
-    </div>
+    </DeepVoidBackground>
   )
 }
 

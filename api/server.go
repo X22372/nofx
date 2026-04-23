@@ -2,39 +2,34 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"nofx/auth"
-	"nofx/backtest"
-	"nofx/config"
 	"nofx/crypto"
-	"nofx/decision"
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/store"
-	"nofx/trader"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // Server HTTP API server
 type Server struct {
-	router          *gin.Engine
-	traderManager   *manager.TraderManager
-	store           *store.Store
-	cryptoHandler   *CryptoHandler
-	backtestManager *backtest.Manager
-	httpServer      *http.Server
-	port            int
+	router                    *gin.Engine
+	traderManager             *manager.TraderManager
+	store                     *store.Store
+	cryptoHandler             *CryptoHandler
+	exchangeAccountStateCache *ExchangeAccountStateCache
+	httpServer                *http.Server
+	port                      int
+	telegramReloadCh          chan<- struct{} // signal Telegram bot to reload
 }
 
 // NewServer Creates API server
-func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoService *crypto.CryptoService, backtestManager *backtest.Manager, port int) *Server {
+func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoService *crypto.CryptoService, port int) *Server {
 	// Set to Release mode (reduce log output)
 	gin.SetMode(gin.ReleaseMode)
 
@@ -47,12 +42,12 @@ func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoServ
 	cryptoHandler := NewCryptoHandler(cryptoService)
 
 	s := &Server{
-		router:          router,
-		traderManager:   traderManager,
-		store:           st,
-		cryptoHandler:   cryptoHandler,
-		backtestManager: backtestManager,
-		port:            port,
+		router:                    router,
+		traderManager:             traderManager,
+		store:                     st,
+		cryptoHandler:             cryptoHandler,
+		exchangeAccountStateCache: NewExchangeAccountStateCache(),
+		port:                      port,
 	}
 
 	// Setup routes
@@ -88,84 +83,280 @@ func (s *Server) setupRoutes() {
 		// Admin login (used in admin mode, public)
 
 		// System supported models and exchanges (no authentication required)
-		api.GET("/supported-models", s.handleGetSupportedModels)
-		api.GET("/supported-exchanges", s.handleGetSupportedExchanges)
+		s.route(api, "GET", "/supported-models", "List supported AI model providers", s.handleGetSupportedModels)
+		s.route(api, "GET", "/supported-exchanges", "List supported exchange types", s.handleGetSupportedExchanges)
 
 		// System config (no authentication required, for frontend to determine admin mode/registration status)
-		api.GET("/config", s.handleGetSystemConfig)
+		s.route(api, "GET", "/config", "Get system configuration", s.handleGetSystemConfig)
 
-		// Crypto related endpoints (no authentication required)
+		// Wallet validation (no authentication required — used by frontend config form)
+		api.POST("/wallet/validate", s.handleWalletValidate)
+		api.POST("/wallet/generate", s.handleWalletGenerate)
+
+		// Crypto related endpoints (no authentication required, not exposed to bot)
+		api.GET("/crypto/config", s.cryptoHandler.HandleGetCryptoConfig)
 		api.GET("/crypto/public-key", s.cryptoHandler.HandleGetPublicKey)
 		api.POST("/crypto/decrypt", s.cryptoHandler.HandleDecryptSensitiveData)
 
-		// System prompt template management (no authentication required)
-		api.GET("/prompt-templates", s.handleGetPromptTemplates)
-		api.GET("/prompt-templates/:name", s.handleGetPromptTemplate)
-
 		// Public competition data (no authentication required)
-		api.GET("/traders", s.handlePublicTraderList)
-		api.GET("/competition", s.handlePublicCompetition)
-		api.GET("/top-traders", s.handleTopTraders)
-		api.GET("/equity-history", s.handleEquityHistory)
-		api.POST("/equity-history-batch", s.handleEquityHistoryBatch)
-		api.GET("/traders/:id/public-config", s.handleGetPublicTraderConfig)
+		s.route(api, "GET", "/traders", "Public trader list", s.handlePublicTraderList)
+		s.route(api, "GET", "/competition", "Public competition data", s.handlePublicCompetition)
+		s.route(api, "GET", "/top-traders", "Top traders leaderboard", s.handleTopTraders)
+		s.route(api, "GET", "/equity-history", "Equity history for a trader", s.handleEquityHistory)
+		s.route(api, "POST", "/equity-history-batch", "Batch equity history for multiple traders", s.handleEquityHistoryBatch)
+		s.route(api, "GET", "/traders/:id/public-config", "Public trader configuration", s.handleGetPublicTraderConfig)
+
+		// Market data (no authentication required)
+		s.route(api, "GET", "/klines", "Candlestick data (?symbol=&interval=&limit=)", s.handleKlines)
+		s.route(api, "GET", "/symbols", "Available trading symbols", s.handleSymbols)
+
+		// Public strategy market (no authentication required)
+		s.route(api, "GET", "/strategies/public", "Public strategy market", s.handlePublicStrategies)
+		s.route(api, "POST", "/strategies/estimate-tokens", "Estimate token usage for a strategy config", s.handleEstimateTokens)
 
 		// Authentication related routes (no authentication required)
-		api.POST("/register", s.handleRegister)
-		api.POST("/login", s.handleLogin)
-		api.POST("/verify-otp", s.handleVerifyOTP)
-		api.POST("/complete-registration", s.handleCompleteRegistration)
+		s.route(api, "POST", "/register", "Register new user", s.handleRegister)
+		s.route(api, "POST", "/login", "User login, returns JWT token", s.handleLogin)
+		s.route(api, "POST", "/reset-password", "Reset password", s.handleResetPassword)
+		s.route(api, "POST", "/reset-account", "Clear all users and reset system to allow re-registration", s.handleResetAccount)
 
 		// Routes requiring authentication
 		protected := api.Group("/", s.authMiddleware())
 		{
 			// Logout (add to blacklist)
-			protected.POST("/logout", s.handleLogout)
+			s.route(protected, "POST", "/logout", "Logout (blacklist token)", s.handleLogout)
+			s.route(protected, "POST", "/onboarding/beginner", "Prepare beginner claw402 wallet and default model", s.handleBeginnerOnboarding)
+			s.route(protected, "GET", "/onboarding/beginner/current", "Get current beginner claw402 wallet", s.handleCurrentBeginnerWallet)
+
+			// User account management
+			s.routeWithSchema(protected, "PUT", "/user/password", "Change current user password",
+				`Body: {"new_password":"<string, min 8 chars>"}`,
+				s.handleChangePassword)
 
 			// Server IP query (requires authentication, for whitelist configuration)
-			protected.GET("/server-ip", s.handleGetServerIP)
+			s.route(protected, "GET", "/server-ip", "Get server public IP (for exchange whitelist)", s.handleGetServerIP)
 
 			// AI trader management
-			protected.GET("/my-traders", s.handleTraderList)
-			protected.GET("/traders/:id/config", s.handleGetTraderConfig)
-			protected.POST("/traders", s.handleCreateTrader)
-			protected.PUT("/traders/:id", s.handleUpdateTrader)
-			protected.DELETE("/traders/:id", s.handleDeleteTrader)
-			protected.POST("/traders/:id/start", s.handleStartTrader)
-			protected.POST("/traders/:id/stop", s.handleStopTrader)
-			protected.PUT("/traders/:id/prompt", s.handleUpdateTraderPrompt)
-			protected.POST("/traders/:id/sync-balance", s.handleSyncBalance)
-			protected.POST("/traders/:id/close-position", s.handleClosePosition)
+			s.routeWithSchema(protected, "GET", "/my-traders", "List user's traders with status",
+				`Returns: [{"trader_id":"<EXACT id — use this as trader_id in all ?trader_id= queries and POST /traders/:id/start|stop>","trader_name":"<string>","is_running":<bool>}]
+NOTE: The id field is "trader_id" (NOT "id"). Always read trader_id from this endpoint before querying data.`,
+				s.handleTraderList)
+			s.routeWithSchema(protected, "GET", "/traders/:id/config", "Get full trader configuration",
+				`:id = trader_id from GET /api/my-traders`,
+				s.handleGetTraderConfig)
+			s.routeWithSchema(protected, "POST", "/traders", "Create a new AI trader",
+				`Body: {"name":"<string, required>","ai_model_id":"<EXACT id field from GET /api/models — e.g. 'abc123_deepseek', NOT the provider name 'deepseek'>","exchange_id":"<EXACT id field from GET /api/exchanges — e.g. '05785d3b-841e-...', NOT the type name>","strategy_id":"<EXACT id field from GET /api/strategies>","scan_interval_minutes":<int, default 3, minimum 3>}
+IMPORTANT: ai_model_id and exchange_id must be the full "id" value from the Account State, not the provider/type name.`,
+				s.handleCreateTrader)
+			s.routeWithSchema(protected, "PUT", "/traders/:id", "Update trader configuration",
+				`:id = trader_id from GET /api/my-traders
+Body: {"name":"<string>","ai_model_id":"<EXACT id from GET /api/models>","exchange_id":"<EXACT id from GET /api/exchanges>","strategy_id":"<EXACT id from GET /api/strategies>","scan_interval_minutes":<int, min 3>,"is_cross_margin":<bool>}
+Only include fields you want to change.`,
+				s.handleUpdateTrader)
+			s.routeWithSchema(protected, "DELETE", "/traders/:id", "Delete trader",
+				`:id = trader_id from GET /api/my-traders. Stops and permanently removes the trader and all its data.`,
+				s.handleDeleteTrader)
+			s.routeWithSchema(protected, "POST", "/traders/:id/start", "Start trader — begins live trading",
+				`:id = trader_id from GET /api/my-traders. No request body needed. The trader must have a valid exchange and AI model configured.`,
+				s.handleStartTrader)
+			s.routeWithSchema(protected, "POST", "/traders/:id/stop", "Stop trader — halts live trading",
+				`:id = trader_id from GET /api/my-traders. No request body needed. Gracefully stops the trading loop.`,
+				s.handleStopTrader)
+			s.routeWithSchema(protected, "PUT", "/traders/:id/prompt", "Override the trader's AI system prompt",
+				`Body: {"prompt":"<string — the full custom prompt text>"}`,
+				s.handleUpdateTraderPrompt)
+			s.routeWithSchema(protected, "POST", "/traders/:id/sync-balance", "Sync account balance from exchange",
+				`:id = trader_id from GET /api/my-traders. No request body needed. Refreshes initial_balance from the exchange.`,
+				s.handleSyncBalance)
+			s.routeWithSchema(protected, "POST", "/traders/:id/close-position", "Force-close an open position",
+				`:id = trader_id from GET /api/my-traders.
+Body: {"symbol":"<string, e.g. BTCUSDT — must match an open position symbol from GET /api/positions>"}`,
+				s.handleClosePosition)
+			s.routeWithSchema(protected, "PUT", "/traders/:id/competition", "Toggle competition leaderboard visibility",
+				`:id = trader_id from GET /api/my-traders.
+Body: {"show_in_competition":<bool>}`,
+				s.handleToggleCompetition)
+			s.routeWithSchema(protected, "GET", "/traders/:id/grid-risk", "Get grid trading risk info",
+				`:id = trader_id from GET /api/my-traders.`,
+				s.handleGetGridRiskInfo)
+
+			// AI cost tracking
+			s.route(protected, "GET", "/ai-costs", "Get AI call costs for a trader (?trader_id=xxx&period=today)", s.handleGetAICosts)
+			s.route(protected, "GET", "/ai-costs/summary", "Get AI cost summary (?period=today)", s.handleGetAICostsSummary)
 
 			// AI model configuration
-			protected.GET("/models", s.handleGetModelConfigs)
-			protected.PUT("/models", s.handleUpdateModelConfigs)
+			s.routeWithSchema(protected, "GET", "/models", "List AI model configs",
+				`Returns: [{"id":"<EXACT id — use this as ai_model_id when creating/updating a trader>","name":"<display name>","provider":"<short provider name — NOT a valid id>","enabled":<bool>}]
+CRITICAL: The "id" field (e.g. "abc123_deepseek") is what you must use for ai_model_id. The "provider" field ("deepseek") is NOT valid as an id.`,
+				s.handleGetModelConfigs)
+			s.routeWithSchema(protected, "PUT", "/models", "Configure an AI model provider",
+				`Body: {"models":{"<model_id>":{"enabled":<bool>,"api_key":"<string>","custom_api_url":"<string, leave empty to use provider default>","custom_model_name":"<string, leave empty to use provider default>"}}}
+model_id values: "openai","deepseek","qwen","kimi","grok","gemini","claude"
+Defaults when custom fields empty: openai→api.openai.com/v1, deepseek→api.deepseek.com, qwen→dashscope.aliyuncs.com/compatible-mode/v1, kimi→api.moonshot.ai/v1, grok→api.x.ai/v1, gemini→generativelanguage.googleapis.com/v1beta/openai, claude→api.anthropic.com/v1`,
+				s.handleUpdateModelConfigs)
 
 			// Exchange configuration
-			protected.GET("/exchanges", s.handleGetExchangeConfigs)
-			protected.PUT("/exchanges", s.handleUpdateExchangeConfigs)
+			s.routeWithSchema(protected, "GET", "/exchanges", "List exchange accounts",
+				`Returns: [{"id":"<EXACT id — use this as exchange_id when creating/updating a trader>","exchange_type":"<e.g. okx, binance>","account_name":"<user label>","enabled":<bool>}]
+CRITICAL: Always use the "id" field for exchange_id. Do not use "exchange_type" as an id.`,
+				s.handleGetExchangeConfigs)
+			s.routeWithSchema(protected, "GET", "/exchanges/account-state", "Get connection and balance state for each exchange account",
+				`Returns: {"states":{"<exchange_id>":{"status":"ok|disabled|missing_credentials|invalid_credentials|permission_denied|unavailable","display_balance":"<string>","total_equity":<number>,"available_balance":<number>,"asset":"USDT|USDC","checked_at":"<RFC3339>","error_code":"<string>","error_message":"<string>"}}}
+Use this endpoint to show balance and health in the exchange list without depending on traders.`,
+				s.handleGetExchangeAccountStates)
+			s.routeWithSchema(protected, "POST", "/exchanges", "Create a new exchange account",
+				`Body: {"exchange_type":"<string>","account_name":"<string, user label>","enabled":true,"api_key":"<string>","secret_key":"<string>","passphrase":"<string, required for okx/gate/kucoin>"}
+exchange_type values: "binance","bybit","okx","bitget","gate","kucoin","indodax" (CEX) | "hyperliquid","aster","lighter" (DEX)
+Required fields by exchange:
+  binance/bybit/bitget/indodax: api_key + secret_key
+  okx/gate/kucoin: api_key + secret_key + passphrase
+  hyperliquid: hyperliquid_wallet_addr
+  aster: aster_user + aster_signer + aster_private_key
+  lighter: lighter_wallet_addr + lighter_private_key + lighter_api_key_private_key + lighter_api_key_index`,
+				s.handleCreateExchange)
+			s.routeWithSchema(protected, "PUT", "/exchanges", "Update an existing exchange account configuration",
+				`Body: {"id":"<EXACT id from GET /api/exchanges>","exchange_type":"<string>","account_name":"<string>","enabled":<bool>,"api_key":"<string>","secret_key":"<string>","passphrase":"<string, for okx/gate/kucoin>"}
+Use this to enable/disable an exchange or update API credentials. The "id" field is required to identify which exchange to update.`,
+				s.handleUpdateExchangeConfigs)
+			s.routeWithSchema(protected, "DELETE", "/exchanges/:id", "Delete exchange account",
+				`:id = EXACT id from GET /api/exchanges. Permanently removes the exchange account and disconnects any traders using it.`,
+				s.handleDeleteExchange)
+
+			// Telegram bot configuration
+			s.routeWithSchema(protected, "GET", "/telegram", "Get Telegram bot configuration",
+				`Returns: {"bot_token":"<string>","model_id":"<EXACT id of configured AI model>","chat_id":"<bound Telegram chat id, empty if not bound>"}`,
+				s.handleGetTelegramConfig)
+			s.routeWithSchema(protected, "POST", "/telegram", "Set Telegram bot token and AI model",
+				`Body: {"bot_token":"<string — Telegram BotFather token>","model_id":"<EXACT id from GET /api/models>"}
+Both fields are required. After saving, the user must send /start in Telegram to bind their account.`,
+				s.handleUpdateTelegramConfig)
+			s.routeWithSchema(protected, "POST", "/telegram/model", "Update Telegram bot AI model only",
+				`Body: {"model_id":"<EXACT id from GET /api/models>"}`,
+				s.handleUpdateTelegramModel)
+			s.routeWithSchema(protected, "DELETE", "/telegram/binding", "Unbind Telegram account",
+				`No body needed. Clears the Telegram chat_id binding so the user can re-bind with /start.`,
+				s.handleUnbindTelegram)
 
 			// Strategy management
-			protected.GET("/strategies", s.handleGetStrategies)
-			protected.GET("/strategies/active", s.handleGetActiveStrategy)
-			protected.GET("/strategies/default-config", s.handleGetDefaultStrategyConfig)
-			protected.GET("/strategies/templates", s.handleGetPromptTemplates)
-			protected.POST("/strategies/preview-prompt", s.handlePreviewPrompt)
-			protected.POST("/strategies/test-run", s.handleStrategyTestRun)
-			protected.GET("/strategies/:id", s.handleGetStrategy)
-			protected.POST("/strategies", s.handleCreateStrategy)
-			protected.PUT("/strategies/:id", s.handleUpdateStrategy)
-			protected.DELETE("/strategies/:id", s.handleDeleteStrategy)
-			protected.POST("/strategies/:id/activate", s.handleActivateStrategy)
-			protected.POST("/strategies/:id/duplicate", s.handleDuplicateStrategy)
+			s.routeWithSchema(protected, "GET", "/strategies", "List user's strategies",
+				`Returns: [{"id":"<EXACT id — use as strategy_id when creating/updating a trader>","name":"<string>","is_active":<bool>,"is_default":<bool>}]
+CRITICAL: Always use the "id" field for strategy_id.`,
+				s.handleGetStrategies)
+			s.routeWithSchema(protected, "GET", "/strategies/active", "Get the currently active strategy",
+				`Returns the strategy marked is_active=true for this user, or the system default. Use this to find which strategy is currently in use.`,
+				s.handleGetActiveStrategy)
+			s.routeWithSchema(protected, "GET", "/strategies/default-config", "Get default strategy config with all fields and sensible values — use as reference for building configs",
+				`No parameters needed. Returns a complete StrategyConfig object with all fields populated with recommended defaults. Read this before building a custom config.`,
+				s.handleGetDefaultStrategyConfig)
+			s.route(protected, "POST", "/strategies/preview-prompt", "Preview the AI prompt that will be generated from a config", s.handlePreviewPrompt)
+			s.route(protected, "POST", "/strategies/test-run", "Test-run strategy AI analysis", s.handleStrategyTestRun)
+			s.route(protected, "GET", "/strategies/:id", "Get strategy by ID", s.handleGetStrategy)
+			s.routeWithSchema(protected, "POST", "/strategies", "Create a new trading strategy",
+				`Body: {"name":"<string, required>","description":"<string, optional>","lang":"zh|en","config":<StrategyConfig object, OPTIONAL — if omitted the system applies complete working defaults automatically (ai500 top coins, all standard indicators, standard risk control)>}
+IMPORTANT: For most use cases just POST {"name":"<name>"} — the backend fills everything in. Only include "config" when the user explicitly requests custom settings (specific coins, custom leverage, custom timeframes).
+
+StrategyConfig fields:
+  coin_source.source_type: "static"(fixed coin list) | "ai500"(AI top500 ranking) | "oi_top"(OI increasing, suited for long) | "oi_low"(OI decreasing, suited for short) | "mixed"
+  coin_source.static_coins: ["BTCUSDT","ETHUSDT"] — only when source_type="static"
+  coin_source.use_ai500, ai500_limit: number of coins from AI500 pool (default 10)
+  coin_source.use_oi_top/use_oi_low, oi_top_limit/oi_low_limit: OI-based coin selection
+  indicators.klines.primary_timeframe: "1m"|"3m"|"5m"|"15m"|"1h"|"4h" — scalping→"5m", trend/swing→"1h"/"4h"
+  indicators.klines.primary_count: number of candles (20-100)
+  indicators.klines.enable_multi_timeframe: true for trend/swing analysis
+  indicators.klines.selected_timeframes: e.g. ["5m","15m","1h","4h"]
+  indicators.enable_raw_klines: ALWAYS true (raw OHLCV required)
+  indicators.enable_ema: true for trend-following (EMA crossover signals)
+  indicators.enable_macd: true for trend + momentum confirmation
+  indicators.enable_rsi: true for overbought/oversold, divergence detection
+  indicators.enable_boll: true for volatility, range trading, breakout strategies
+  indicators.enable_atr: true for volatility measurement and stop-loss sizing
+  indicators.enable_volume: ALWAYS true
+  indicators.enable_oi: ALWAYS true (open interest data)
+  indicators.enable_funding_rate: ALWAYS true
+  indicators.ema_periods: [20,50] default, [9,21] for faster signals
+  indicators.rsi_periods: [7,14] default
+  indicators.atr_periods: [14] default
+  indicators.boll_periods: [20] default
+  indicators.nofxos_api_key: ALWAYS "cm_568c67eae410d912c54c"
+  indicators.enable_quant_data: ALWAYS true
+  indicators.enable_quant_oi: ALWAYS true
+  indicators.enable_quant_netflow: ALWAYS true
+  indicators.enable_oi_ranking: ALWAYS true, oi_ranking_duration:"1h", oi_ranking_limit:10
+  indicators.enable_netflow_ranking: ALWAYS true, netflow_ranking_duration:"1h", netflow_ranking_limit:10
+  indicators.enable_price_ranking: ALWAYS true, price_ranking_duration:"1h,4h,24h", price_ranking_limit:10
+  risk_control.max_positions: max simultaneous positions (1=single coin, 3=diversified, 5=wide)
+  risk_control.btc_eth_max_leverage: BTC/ETH leverage (conservative:3-5, moderate:5-10, aggressive:10-20)
+  risk_control.altcoin_max_leverage: altcoin leverage (usually lower than BTC leverage)
+  risk_control.btc_eth_max_position_value_ratio: max position size as multiple of equity (default 5)
+  risk_control.altcoin_max_position_value_ratio: default 1
+  risk_control.max_margin_usage: 0.5-0.95 (default 0.9 = use up to 90% margin)
+  risk_control.min_position_size: minimum USDT per trade (default 12)
+  risk_control.min_risk_reward_ratio: minimum profit/loss ratio required (default 3 = 3:1)
+  risk_control.min_confidence: minimum AI confidence to open position (default 75, range 60-90)
+  prompt_sections.role_definition: describe the AI's trading persona and goal
+  prompt_sections.trading_frequency: guidelines on how often to trade
+  prompt_sections.entry_standards: conditions that must align before entering a position
+  prompt_sections.decision_process: step-by-step decision-making framework`,
+				s.handleCreateStrategy)
+			s.routeWithSchema(protected, "PUT", "/strategies/:id", "Update an existing strategy — WORKFLOW: 1) GET /api/strategies/:id first to read current config 2) Merge your changes into the full config 3) PUT with complete merged config 4) GET again to verify saved values",
+				`Body: {"name":"<string>","description":"<string>","config":<complete StrategyConfig — same structure as POST /api/strategies>}
+IMPORTANT: config is merged with existing values server-side, but always send the complete section you are modifying.
+After updating, always GET /api/strategies/:id to verify and show the user actual saved values.`,
+				s.handleUpdateStrategy)
+			s.routeWithSchema(protected, "DELETE", "/strategies/:id", "Delete strategy",
+				`:id = EXACT id from GET /api/strategies. Cannot delete a strategy that is currently assigned to a running trader.`,
+				s.handleDeleteStrategy)
+			s.routeWithSchema(protected, "POST", "/strategies/:id/activate", "Mark a strategy as the active strategy for this user",
+				`:id = EXACT id from GET /api/strategies.
+No request body needed. Sets this strategy as is_active=true (and deactivates the previous active strategy).
+After activating, create or update a trader with this strategy_id to apply it.`,
+				s.handleActivateStrategy)
+			s.routeWithSchema(protected, "POST", "/strategies/:id/duplicate", "Duplicate an existing strategy",
+				`:id = EXACT id from GET /api/strategies. Creates a copy with " (copy)" appended to the name.`,
+				s.handleDuplicateStrategy)
 
 			// Data for specified trader (using query parameter ?trader_id=xxx)
-			protected.GET("/status", s.handleStatus)
-			protected.GET("/account", s.handleAccount)
-			protected.GET("/positions", s.handlePositions)
-			protected.GET("/decisions", s.handleDecisions)
-			protected.GET("/decisions/latest", s.handleLatestDecisions)
-			protected.GET("/statistics", s.handleStatistics)
+			// IMPORTANT: All ?trader_id= values must be the EXACT "trader_id" field from GET /api/my-traders
+			s.routeWithSchema(protected, "GET", "/status", "Trader running status",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
+Returns: {"is_running":<bool>,"trader_id":"<string>"}`,
+				s.handleStatus)
+			s.routeWithSchema(protected, "GET", "/account", "Account balance and equity",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
+Returns: {"balance":<float>,"equity":<float>,"unrealized_pnl":<float>,"initial_balance":<float>,"total_return_pct":<float>}`,
+				s.handleAccount)
+			s.routeWithSchema(protected, "GET", "/positions", "Current open positions",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
+Returns: [{"symbol":"<string>","side":"long|short","size":<float>,"entry_price":<float>,"mark_price":<float>,"unrealized_pnl":<float>,"leverage":<int>}]`,
+				s.handlePositions)
+			s.routeWithSchema(protected, "GET", "/positions/history", "Closed position history",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 20>`,
+				s.handlePositionHistory)
+			s.routeWithSchema(protected, "GET", "/trades", "Trade records",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 20>`,
+				s.handleTrades)
+			s.routeWithSchema(protected, "GET", "/orders", "All order records",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 20>`,
+				s.handleOrders)
+			s.routeWithSchema(protected, "GET", "/orders/:id/fills", "Order fill details",
+				`:id = order id from GET /api/orders`,
+				s.handleOrderFills)
+			s.routeWithSchema(protected, "GET", "/open-orders", "Open orders currently on exchange",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>`,
+				s.handleOpenOrders)
+			s.routeWithSchema(protected, "GET", "/decisions", "AI trading decisions (decision records)",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>&limit=<int, default 20>
+Returns: [{"id":"<string>","symbol":"<string>","action":"open_long|open_short|close_long|close_short|hold","confidence":<int>,"reasoning":"<string>","created_at":"<timestamp>"}]`,
+				s.handleDecisions)
+			s.routeWithSchema(protected, "GET", "/decisions/latest", "Latest AI decisions (most recent scan results)",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
+Returns the most recent AI decision for each symbol analyzed in the last scan cycle.`,
+				s.handleLatestDecisions)
+			s.routeWithSchema(protected, "GET", "/statistics", "Trading performance statistics",
+				`Query: ?trader_id=<EXACT trader_id from GET /api/my-traders>
+Returns: {"total_trades":<int>,"winning_trades":<int>,"win_rate":<float>,"total_pnl":<float>,"sharpe_ratio":<float>,"max_drawdown":<float>}`,
+				s.handleStatistics)
+
 		}
 	}
 }
@@ -180,12 +371,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 // handleGetSystemConfig Get system configuration (configuration that client needs to know)
 func (s *Server) handleGetSystemConfig(c *gin.Context) {
-	cfg := config.Get()
-
+	userCount, _ := s.store.User().Count()
 	c.JSON(http.StatusOK, gin.H{
-		"registration_enabled": cfg.RegistrationEnabled,
-		"btc_eth_leverage":     10, // Default value
-		"altcoin_leverage":     5,  // Default value
+		"initialized":      userCount > 0,
+		"btc_eth_leverage": 10,
+		"altcoin_leverage": 5,
 	})
 }
 
@@ -211,13 +401,14 @@ func (s *Server) handleGetServerIP(c *gin.Context) {
 	})
 }
 
-// getPublicIPFromAPI Get public IP via third-party API
+// getPublicIPFromAPI Get public IP via third-party API (IPv4 only)
 func getPublicIPFromAPI() string {
-	// Try multiple public IP query services
+	// Try multiple public IP query services (IPv4-only endpoints)
 	services := []string{
-		"https://api.ipify.org?format=text",
-		"https://icanhazip.com",
-		"https://ifconfig.me",
+		"https://api4.ipify.org?format=text", // IPv4 only
+		"https://ipv4.icanhazip.com",         // IPv4 only
+		"https://v4.ident.me",                // IPv4 only
+		"https://api.ipify.org?format=text",  // May return IPv4 or IPv6
 	}
 
 	client := &http.Client{
@@ -239,8 +430,9 @@ func getPublicIPFromAPI() string {
 			}
 
 			ip := strings.TrimSpace(string(body[:n]))
-			// Verify if it's a valid IP address
-			if net.ParseIP(ip) != nil {
+			parsedIP := net.ParseIP(ip)
+			// Verify if it's a valid IPv4 address (not containing ":")
+			if parsedIP != nil && parsedIP.To4() != nil {
 				return ip
 			}
 		}
@@ -346,1343 +538,6 @@ func (s *Server) getTraderFromQuery(c *gin.Context) (*manager.TraderManager, str
 	return s.traderManager, traderID, nil
 }
 
-// AI trader management related structures
-type CreateTraderRequest struct {
-	Name                string  `json:"name" binding:"required"`
-	AIModelID           string  `json:"ai_model_id" binding:"required"`
-	ExchangeID          string  `json:"exchange_id" binding:"required"`
-	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	IsCrossMargin       *bool   `json:"is_cross_margin"` // Pointer type, nil means use default value true
-	// The following fields are kept for backward compatibility, new version uses strategy config
-	BTCETHLeverage       int    `json:"btc_eth_leverage"`
-	AltcoinLeverage      int    `json:"altcoin_leverage"`
-	TradingSymbols       string `json:"trading_symbols"`
-	CustomPrompt         string `json:"custom_prompt"`
-	OverrideBasePrompt   bool   `json:"override_base_prompt"`
-	SystemPromptTemplate string `json:"system_prompt_template"` // System prompt template name
-	UseCoinPool          bool   `json:"use_coin_pool"`
-	UseOITop             bool   `json:"use_oi_top"`
-}
-
-type ModelConfig struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Provider     string `json:"provider"`
-	Enabled      bool   `json:"enabled"`
-	APIKey       string `json:"apiKey,omitempty"`
-	CustomAPIURL string `json:"customApiUrl,omitempty"`
-}
-
-// SafeModelConfig Safe model configuration structure (does not contain sensitive information)
-type SafeModelConfig struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Provider        string `json:"provider"`
-	Enabled         bool   `json:"enabled"`
-	CustomAPIURL    string `json:"customApiUrl"`    // Custom API URL (usually not sensitive)
-	CustomModelName string `json:"customModelName"` // Custom model name (not sensitive)
-}
-
-type ExchangeConfig struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"` // "cex" or "dex"
-	Enabled   bool   `json:"enabled"`
-	APIKey    string `json:"apiKey,omitempty"`
-	SecretKey string `json:"secretKey,omitempty"`
-	Testnet   bool   `json:"testnet,omitempty"`
-}
-
-// SafeExchangeConfig Safe exchange configuration structure (does not contain sensitive information)
-type SafeExchangeConfig struct {
-	ID                    string `json:"id"`
-	Name                  string `json:"name"`
-	Type                  string `json:"type"` // "cex" or "dex"
-	Enabled               bool   `json:"enabled"`
-	Testnet               bool   `json:"testnet,omitempty"`
-	HyperliquidWalletAddr string `json:"hyperliquidWalletAddr"` // Hyperliquid wallet address (not sensitive)
-	AsterUser             string `json:"asterUser"`             // Aster username (not sensitive)
-	AsterSigner           string `json:"asterSigner"`           // Aster signer (not sensitive)
-}
-
-type UpdateModelConfigRequest struct {
-	Models map[string]struct {
-		Enabled         bool   `json:"enabled"`
-		APIKey          string `json:"api_key"`
-		CustomAPIURL    string `json:"custom_api_url"`
-		CustomModelName string `json:"custom_model_name"`
-	} `json:"models"`
-}
-
-type UpdateExchangeConfigRequest struct {
-	Exchanges map[string]struct {
-		Enabled                 bool   `json:"enabled"`
-		APIKey                  string `json:"api_key"`
-		SecretKey               string `json:"secret_key"`
-		Passphrase              string `json:"passphrase"` // OKX specific
-		Testnet                 bool   `json:"testnet"`
-		HyperliquidWalletAddr   string `json:"hyperliquid_wallet_addr"`
-		AsterUser               string `json:"aster_user"`
-		AsterSigner             string `json:"aster_signer"`
-		AsterPrivateKey         string `json:"aster_private_key"`
-		LighterWalletAddr       string `json:"lighter_wallet_addr"`
-		LighterPrivateKey       string `json:"lighter_private_key"`
-		LighterAPIKeyPrivateKey string `json:"lighter_api_key_private_key"`
-	} `json:"exchanges"`
-}
-
-// handleCreateTrader Create new AI trader
-func (s *Server) handleCreateTrader(c *gin.Context) {
-	userID := c.GetString("user_id")
-	var req CreateTraderRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Validate leverage values
-	if req.BTCETHLeverage < 0 || req.BTCETHLeverage > 50 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "BTC/ETH leverage must be between 1-50x"})
-		return
-	}
-	if req.AltcoinLeverage < 0 || req.AltcoinLeverage > 20 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Altcoin leverage must be between 1-20x"})
-		return
-	}
-
-	// Validate trading symbol format
-	if req.TradingSymbols != "" {
-		symbols := strings.Split(req.TradingSymbols, ",")
-		for _, symbol := range symbols {
-			symbol = strings.TrimSpace(symbol)
-			if symbol != "" && !strings.HasSuffix(strings.ToUpper(symbol), "USDT") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid symbol format: %s, must end with USDT", symbol)})
-				return
-			}
-		}
-	}
-
-	// Generate trader ID
-	traderID := fmt.Sprintf("%s_%s_%d", req.ExchangeID, req.AIModelID, time.Now().Unix())
-
-	// Set default values
-	isCrossMargin := true // Default to cross margin mode
-	if req.IsCrossMargin != nil {
-		isCrossMargin = *req.IsCrossMargin
-	}
-
-	// Set leverage default values
-	btcEthLeverage := 10 // Default value
-	altcoinLeverage := 5 // Default value
-	if req.BTCETHLeverage > 0 {
-		btcEthLeverage = req.BTCETHLeverage
-	}
-	if req.AltcoinLeverage > 0 {
-		altcoinLeverage = req.AltcoinLeverage
-	}
-
-	// Set system prompt template default value
-	systemPromptTemplate := "default"
-	if req.SystemPromptTemplate != "" {
-		systemPromptTemplate = req.SystemPromptTemplate
-	}
-
-	// Set scan interval default value
-	scanIntervalMinutes := req.ScanIntervalMinutes
-	if scanIntervalMinutes < 3 {
-		scanIntervalMinutes = 3 // Default 3 minutes, not allowed to be less than 3
-	}
-
-	// Query exchange actual balance, override user input
-	actualBalance := req.InitialBalance // Default to use user input
-	exchanges, err := s.store.Exchange().List(userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to get exchange config, using user input for initial balance: %v", err)
-	}
-
-	// Find matching exchange configuration
-	var exchangeCfg *store.Exchange
-	for _, ex := range exchanges {
-		if ex.ID == req.ExchangeID {
-			exchangeCfg = ex
-			break
-		}
-	}
-
-	if exchangeCfg == nil {
-		logger.Infof("⚠️ Exchange %s configuration not found, using user input for initial balance", req.ExchangeID)
-	} else if !exchangeCfg.Enabled {
-		logger.Infof("⚠️ Exchange %s not enabled, using user input for initial balance", req.ExchangeID)
-	} else {
-		// Create temporary trader based on exchange type to query balance
-		var tempTrader trader.Trader
-		var createErr error
-
-		switch req.ExchangeID {
-		case "binance":
-			tempTrader = trader.NewFuturesTrader(exchangeCfg.APIKey, exchangeCfg.SecretKey, userID)
-		case "hyperliquid":
-			tempTrader, createErr = trader.NewHyperliquidTrader(
-				exchangeCfg.APIKey, // private key
-				exchangeCfg.HyperliquidWalletAddr,
-				exchangeCfg.Testnet,
-			)
-		case "aster":
-			tempTrader, createErr = trader.NewAsterTrader(
-				exchangeCfg.AsterUser,
-				exchangeCfg.AsterSigner,
-				exchangeCfg.AsterPrivateKey,
-			)
-		case "bybit":
-			tempTrader = trader.NewBybitTrader(
-				exchangeCfg.APIKey,
-				exchangeCfg.SecretKey,
-			)
-		default:
-			logger.Infof("⚠️ Unsupported exchange type: %s, using user input for initial balance", req.ExchangeID)
-		}
-
-		if createErr != nil {
-			logger.Infof("⚠️ Failed to create temporary trader, using user input for initial balance: %v", createErr)
-		} else if tempTrader != nil {
-			// Query actual balance
-			balanceInfo, balanceErr := tempTrader.GetBalance()
-			if balanceErr != nil {
-				logger.Infof("⚠️ Failed to query exchange balance, using user input for initial balance: %v", balanceErr)
-			} else {
-				// Extract available balance - supports multiple field name formats
-				if availableBalance, ok := balanceInfo["availableBalance"].(float64); ok && availableBalance > 0 {
-					// Binance format: availableBalance (camelCase)
-					actualBalance = availableBalance
-					logger.Infof("✓ Queried exchange actual balance: %.2f USDT (user input: %.2f USDT)", actualBalance, req.InitialBalance)
-				} else if availableBalance, ok := balanceInfo["available_balance"].(float64); ok && availableBalance > 0 {
-					// Other format: available_balance (snake_case)
-					actualBalance = availableBalance
-					logger.Infof("✓ Queried exchange actual balance: %.2f USDT (user input: %.2f USDT)", actualBalance, req.InitialBalance)
-				} else if totalBalance, ok := balanceInfo["totalWalletBalance"].(float64); ok && totalBalance > 0 {
-					// Binance format: totalWalletBalance (camelCase)
-					actualBalance = totalBalance
-					logger.Infof("✓ Queried exchange total balance: %.2f USDT (user input: %.2f USDT)", actualBalance, req.InitialBalance)
-				} else if totalBalance, ok := balanceInfo["balance"].(float64); ok && totalBalance > 0 {
-					// Other format: balance
-					actualBalance = totalBalance
-					logger.Infof("✓ Queried exchange actual balance: %.2f USDT (user input: %.2f USDT)", actualBalance, req.InitialBalance)
-				} else {
-					logger.Infof("⚠️ Unable to extract available balance from balance info, balanceInfo=%v, using user input for initial balance", balanceInfo)
-				}
-			}
-		}
-	}
-
-	// Create trader configuration (database entity)
-	logger.Infof("🔧 DEBUG: Starting to create trader config, ID=%s, Name=%s, AIModel=%s, Exchange=%s, StrategyID=%s", traderID, req.Name, req.AIModelID, req.ExchangeID, req.StrategyID)
-	traderRecord := &store.Trader{
-		ID:                   traderID,
-		UserID:               userID,
-		Name:                 req.Name,
-		AIModelID:            req.AIModelID,
-		ExchangeID:           req.ExchangeID,
-		StrategyID:           req.StrategyID, // Associated strategy ID (new version)
-		InitialBalance:       actualBalance,  // Use actual queried balance
-		BTCETHLeverage:       btcEthLeverage,
-		AltcoinLeverage:      altcoinLeverage,
-		TradingSymbols:       req.TradingSymbols,
-		UseCoinPool:          req.UseCoinPool,
-		UseOITop:             req.UseOITop,
-		CustomPrompt:         req.CustomPrompt,
-		OverrideBasePrompt:   req.OverrideBasePrompt,
-		SystemPromptTemplate: systemPromptTemplate,
-		IsCrossMargin:        isCrossMargin,
-		ScanIntervalMinutes:  scanIntervalMinutes,
-		IsRunning:            false,
-	}
-
-	// Save to database
-	logger.Infof("🔧 DEBUG: Preparing to call CreateTrader")
-	err = s.store.Trader().Create(traderRecord)
-	if err != nil {
-		logger.Infof("❌ Failed to create trader: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to create trader: %v", err)})
-		return
-	}
-	logger.Infof("🔧 DEBUG: CreateTrader succeeded")
-
-	// Immediately load new trader into TraderManager
-	logger.Infof("🔧 DEBUG: Preparing to call LoadUserTraders")
-	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to load user traders into memory: %v", err)
-		// Don't return error here since trader was successfully created in database
-	}
-	logger.Infof("🔧 DEBUG: LoadUserTraders completed")
-
-	logger.Infof("✓ Trader created successfully: %s (model: %s, exchange: %s)", req.Name, req.AIModelID, req.ExchangeID)
-
-	c.JSON(http.StatusCreated, gin.H{
-		"trader_id":   traderID,
-		"trader_name": req.Name,
-		"ai_model":    req.AIModelID,
-		"is_running":  false,
-	})
-}
-
-// UpdateTraderRequest Update trader request
-type UpdateTraderRequest struct {
-	Name                string  `json:"name" binding:"required"`
-	AIModelID           string  `json:"ai_model_id" binding:"required"`
-	ExchangeID          string  `json:"exchange_id" binding:"required"`
-	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	IsCrossMargin       *bool   `json:"is_cross_margin"`
-	// The following fields are kept for backward compatibility, new version uses strategy config
-	BTCETHLeverage       int    `json:"btc_eth_leverage"`
-	AltcoinLeverage      int    `json:"altcoin_leverage"`
-	TradingSymbols       string `json:"trading_symbols"`
-	CustomPrompt         string `json:"custom_prompt"`
-	OverrideBasePrompt   bool   `json:"override_base_prompt"`
-	SystemPromptTemplate string `json:"system_prompt_template"`
-}
-
-// handleUpdateTrader Update trader configuration
-func (s *Server) handleUpdateTrader(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	var req UpdateTraderRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Check if trader exists and belongs to current user
-	traders, err := s.store.Trader().List(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get trader list"})
-		return
-	}
-
-	var existingTrader *store.Trader
-	for _, t := range traders {
-		if t.ID == traderID {
-			existingTrader = t
-			break
-		}
-	}
-
-	if existingTrader == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
-		return
-	}
-
-	// Set default values
-	isCrossMargin := existingTrader.IsCrossMargin // Keep original value
-	if req.IsCrossMargin != nil {
-		isCrossMargin = *req.IsCrossMargin
-	}
-
-	// Set leverage default values
-	btcEthLeverage := req.BTCETHLeverage
-	altcoinLeverage := req.AltcoinLeverage
-	if btcEthLeverage <= 0 {
-		btcEthLeverage = existingTrader.BTCETHLeverage // Keep original value
-	}
-	if altcoinLeverage <= 0 {
-		altcoinLeverage = existingTrader.AltcoinLeverage // Keep original value
-	}
-
-	// Set scan interval, allow updates
-	scanIntervalMinutes := req.ScanIntervalMinutes
-	if scanIntervalMinutes <= 0 {
-		scanIntervalMinutes = existingTrader.ScanIntervalMinutes // Keep original value
-	} else if scanIntervalMinutes < 3 {
-		scanIntervalMinutes = 3
-	}
-
-	// Set system prompt template
-	systemPromptTemplate := req.SystemPromptTemplate
-	if systemPromptTemplate == "" {
-		systemPromptTemplate = existingTrader.SystemPromptTemplate // Keep original value
-	}
-
-	// Handle strategy ID (if not provided, keep original value)
-	strategyID := req.StrategyID
-	if strategyID == "" {
-		strategyID = existingTrader.StrategyID
-	}
-
-	// Update trader configuration
-	traderRecord := &store.Trader{
-		ID:                   traderID,
-		UserID:               userID,
-		Name:                 req.Name,
-		AIModelID:            req.AIModelID,
-		ExchangeID:           req.ExchangeID,
-		StrategyID:           strategyID, // Associated strategy ID
-		InitialBalance:       req.InitialBalance,
-		BTCETHLeverage:       btcEthLeverage,
-		AltcoinLeverage:      altcoinLeverage,
-		TradingSymbols:       req.TradingSymbols,
-		CustomPrompt:         req.CustomPrompt,
-		OverrideBasePrompt:   req.OverrideBasePrompt,
-		SystemPromptTemplate: systemPromptTemplate,
-		IsCrossMargin:        isCrossMargin,
-		ScanIntervalMinutes:  scanIntervalMinutes,
-		IsRunning:            existingTrader.IsRunning, // Keep original value
-	}
-
-	// Update database
-	err = s.store.Trader().Update(traderRecord)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update trader: %v", err)})
-		return
-	}
-
-	// Reload traders into memory
-	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to reload user traders into memory: %v", err)
-	}
-
-	logger.Infof("✓ Trader updated successfully: %s (model: %s, exchange: %s)", req.Name, req.AIModelID, req.ExchangeID)
-
-	c.JSON(http.StatusOK, gin.H{
-		"trader_id":   traderID,
-		"trader_name": req.Name,
-		"ai_model":    req.AIModelID,
-		"message":     "Trader updated successfully",
-	})
-}
-
-// handleDeleteTrader Delete trader
-func (s *Server) handleDeleteTrader(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	// Delete from database
-	err := s.store.Trader().Delete(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete trader: %v", err)})
-		return
-	}
-
-	// If trader is running, stop it first
-	if trader, err := s.traderManager.GetTrader(traderID); err == nil {
-		status := trader.GetStatus()
-		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
-			trader.Stop()
-			logger.Infof("⏹  Stopped running trader: %s", traderID)
-		}
-	}
-
-	logger.Infof("✓ Trader deleted: %s", traderID)
-	c.JSON(http.StatusOK, gin.H{"message": "Trader deleted"})
-}
-
-// handleStartTrader Start trader
-func (s *Server) handleStartTrader(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	// Verify trader belongs to current user
-	_, err := s.store.Trader().GetFullConfig(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		// Trader not in memory, try loading from database
-		logger.Infof("🔄 Trader %s not in memory, trying to load...", traderID)
-		if loadErr := s.traderManager.LoadUserTradersFromStore(s.store, userID); loadErr != nil {
-			logger.Infof("❌ Failed to load user traders: %v", loadErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load trader: " + loadErr.Error()})
-			return
-		}
-		// Try to get trader again
-		trader, err = s.traderManager.GetTrader(traderID)
-		if err != nil {
-			// Check detailed reason
-			fullCfg, _ := s.store.Trader().GetFullConfig(userID, traderID)
-			if fullCfg != nil && fullCfg.Trader != nil {
-				// Check strategy
-				if fullCfg.Strategy == nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Trader has no strategy configured, please create a strategy in Strategy Studio and associate it with the trader"})
-					return
-				}
-				// Check AI model
-				if fullCfg.AIModel == nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's AI model does not exist, please check AI model configuration"})
-					return
-				}
-				if !fullCfg.AIModel.Enabled {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's AI model is not enabled, please enable the AI model first"})
-					return
-				}
-				// Check exchange
-				if fullCfg.Exchange == nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's exchange does not exist, please check exchange configuration"})
-					return
-				}
-				if !fullCfg.Exchange.Enabled {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Trader's exchange is not enabled, please enable the exchange first"})
-					return
-				}
-			}
-			c.JSON(http.StatusNotFound, gin.H{"error": "Failed to load trader, please check AI model, exchange and strategy configuration"})
-			return
-		}
-	}
-
-	// Check if trader is already running
-	status := trader.GetStatus()
-	if isRunning, ok := status["is_running"].(bool); ok && isRunning {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader is already running"})
-		return
-	}
-
-	// Start trader
-	go func() {
-		logger.Infof("▶️  Starting trader %s (%s)", traderID, trader.GetName())
-		if err := trader.Run(); err != nil {
-			logger.Infof("❌ Trader %s runtime error: %v", trader.GetName(), err)
-		}
-	}()
-
-	// Update running status in database
-	err = s.store.Trader().UpdateStatus(userID, traderID, true)
-	if err != nil {
-		logger.Infof("⚠️  Failed to update trader status: %v", err)
-	}
-
-	logger.Infof("✓ Trader %s started", trader.GetName())
-	c.JSON(http.StatusOK, gin.H{"message": "Trader started"})
-}
-
-// handleStopTrader Stop trader
-func (s *Server) handleStopTrader(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	// Verify trader belongs to current user
-	_, err := s.store.Trader().GetFullConfig(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
-		return
-	}
-
-	// Check if trader is running
-	status := trader.GetStatus()
-	if isRunning, ok := status["is_running"].(bool); ok && !isRunning {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader is already stopped"})
-		return
-	}
-
-	// Stop trader
-	trader.Stop()
-
-	// Update running status in database
-	err = s.store.Trader().UpdateStatus(userID, traderID, false)
-	if err != nil {
-		logger.Infof("⚠️  Failed to update trader status: %v", err)
-	}
-
-	logger.Infof("⏹  Trader %s stopped", trader.GetName())
-	c.JSON(http.StatusOK, gin.H{"message": "Trader stopped"})
-}
-
-// handleUpdateTraderPrompt Update trader custom prompt
-func (s *Server) handleUpdateTraderPrompt(c *gin.Context) {
-	traderID := c.Param("id")
-	userID := c.GetString("user_id")
-
-	var req struct {
-		CustomPrompt       string `json:"custom_prompt"`
-		OverrideBasePrompt bool   `json:"override_base_prompt"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Update database
-	err := s.store.Trader().UpdateCustomPrompt(userID, traderID, req.CustomPrompt, req.OverrideBasePrompt)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update custom prompt: %v", err)})
-		return
-	}
-
-	// If trader is in memory, update its custom prompt and override settings
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err == nil {
-		trader.SetCustomPrompt(req.CustomPrompt)
-		trader.SetOverrideBasePrompt(req.OverrideBasePrompt)
-		logger.Infof("✓ Updated trader %s custom prompt (override base=%v)", trader.GetName(), req.OverrideBasePrompt)
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Custom prompt updated"})
-}
-
-// handleSyncBalance Sync exchange balance to initial_balance (Option B: Manual Sync + Option C: Smart Detection)
-func (s *Server) handleSyncBalance(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	logger.Infof("🔄 User %s requested balance sync for trader %s", userID, traderID)
-
-	// Get trader configuration from database (including exchange info)
-	fullConfig, err := s.store.Trader().GetFullConfig(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
-		return
-	}
-
-	traderConfig := fullConfig.Trader
-	exchangeCfg := fullConfig.Exchange
-
-	if exchangeCfg == nil || !exchangeCfg.Enabled {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Exchange not configured or not enabled"})
-		return
-	}
-
-	// Create temporary trader to query balance
-	var tempTrader trader.Trader
-	var createErr error
-
-	switch traderConfig.ExchangeID {
-	case "binance":
-		tempTrader = trader.NewFuturesTrader(exchangeCfg.APIKey, exchangeCfg.SecretKey, userID)
-	case "hyperliquid":
-		tempTrader, createErr = trader.NewHyperliquidTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.HyperliquidWalletAddr,
-			exchangeCfg.Testnet,
-		)
-	case "aster":
-		tempTrader, createErr = trader.NewAsterTrader(
-			exchangeCfg.AsterUser,
-			exchangeCfg.AsterSigner,
-			exchangeCfg.AsterPrivateKey,
-		)
-	case "bybit":
-		tempTrader = trader.NewBybitTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.SecretKey,
-		)
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
-		return
-	}
-
-	if createErr != nil {
-		logger.Infof("⚠️ Failed to create temporary trader: %v", createErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to connect to exchange: %v", createErr)})
-		return
-	}
-
-	// Query actual balance
-	balanceInfo, balanceErr := tempTrader.GetBalance()
-	if balanceErr != nil {
-		logger.Infof("⚠️ Failed to query exchange balance: %v", balanceErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to query balance: %v", balanceErr)})
-		return
-	}
-
-	// Extract available balance
-	var actualBalance float64
-	if availableBalance, ok := balanceInfo["available_balance"].(float64); ok && availableBalance > 0 {
-		actualBalance = availableBalance
-	} else if availableBalance, ok := balanceInfo["availableBalance"].(float64); ok && availableBalance > 0 {
-		actualBalance = availableBalance
-	} else if totalBalance, ok := balanceInfo["balance"].(float64); ok && totalBalance > 0 {
-		actualBalance = totalBalance
-	} else {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to get available balance"})
-		return
-	}
-
-	oldBalance := traderConfig.InitialBalance
-
-	// ✅ Option C: Smart balance change detection
-	changePercent := ((actualBalance - oldBalance) / oldBalance) * 100
-	changeType := "increase"
-	if changePercent < 0 {
-		changeType = "decrease"
-	}
-
-	logger.Infof("✓ Queried actual exchange balance: %.2f USDT (current config: %.2f USDT, change: %.2f%%)",
-		actualBalance, oldBalance, changePercent)
-
-	// Update initial_balance in database
-	err = s.store.Trader().UpdateInitialBalance(userID, traderID, actualBalance)
-	if err != nil {
-		logger.Infof("❌ Failed to update initial_balance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update balance"})
-		return
-	}
-
-	// Reload traders into memory
-	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to reload user traders into memory: %v", err)
-	}
-
-	logger.Infof("✅ Synced balance: %.2f → %.2f USDT (%s %.2f%%)", oldBalance, actualBalance, changeType, changePercent)
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":        "Balance synced successfully",
-		"old_balance":    oldBalance,
-		"new_balance":    actualBalance,
-		"change_percent": changePercent,
-		"change_type":    changeType,
-	})
-}
-
-// handleClosePosition One-click close position
-func (s *Server) handleClosePosition(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	var req struct {
-		Symbol string `json:"symbol" binding:"required"`
-		Side   string `json:"side" binding:"required"` // "LONG" or "SHORT"
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Parameter error: symbol and side are required"})
-		return
-	}
-
-	logger.Infof("🔻 User %s requested position close: trader=%s, symbol=%s, side=%s", userID, traderID, req.Symbol, req.Side)
-
-	// Get trader configuration from database (including exchange info)
-	fullConfig, err := s.store.Trader().GetFullConfig(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
-		return
-	}
-
-	traderConfig := fullConfig.Trader
-	exchangeCfg := fullConfig.Exchange
-
-	if exchangeCfg == nil || !exchangeCfg.Enabled {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Exchange not configured or not enabled"})
-		return
-	}
-
-	// Create temporary trader to execute close position
-	var tempTrader trader.Trader
-	var createErr error
-
-	switch traderConfig.ExchangeID {
-	case "binance":
-		tempTrader = trader.NewFuturesTrader(exchangeCfg.APIKey, exchangeCfg.SecretKey, userID)
-	case "hyperliquid":
-		tempTrader, createErr = trader.NewHyperliquidTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.HyperliquidWalletAddr,
-			exchangeCfg.Testnet,
-		)
-	case "aster":
-		tempTrader, createErr = trader.NewAsterTrader(
-			exchangeCfg.AsterUser,
-			exchangeCfg.AsterSigner,
-			exchangeCfg.AsterPrivateKey,
-		)
-	case "bybit":
-		tempTrader = trader.NewBybitTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.SecretKey,
-		)
-	case "okx":
-		tempTrader = trader.NewOKXTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.SecretKey,
-			exchangeCfg.Passphrase,
-		)
-	case "lighter":
-		if exchangeCfg.LighterAPIKeyPrivateKey != "" {
-			tempTrader, createErr = trader.NewLighterTraderV2(
-				exchangeCfg.LighterPrivateKey,
-				exchangeCfg.LighterWalletAddr,
-				exchangeCfg.LighterAPIKeyPrivateKey,
-				exchangeCfg.Testnet,
-			)
-		} else {
-			tempTrader, createErr = trader.NewLighterTrader(
-				exchangeCfg.LighterPrivateKey,
-				exchangeCfg.LighterWalletAddr,
-				exchangeCfg.Testnet,
-			)
-		}
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported exchange type"})
-		return
-	}
-
-	if createErr != nil {
-		logger.Infof("⚠️ Failed to create temporary trader: %v", createErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to connect to exchange: %v", createErr)})
-		return
-	}
-
-	// Execute close position operation
-	var result map[string]interface{}
-	var closeErr error
-
-	if req.Side == "LONG" {
-		result, closeErr = tempTrader.CloseLong(req.Symbol, 0) // 0 means close all
-	} else if req.Side == "SHORT" {
-		result, closeErr = tempTrader.CloseShort(req.Symbol, 0) // 0 means close all
-	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "side must be LONG or SHORT"})
-		return
-	}
-
-	if closeErr != nil {
-		logger.Infof("❌ Close position failed: symbol=%s, side=%s, error=%v", req.Symbol, req.Side, closeErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to close position: %v", closeErr)})
-		return
-	}
-
-	logger.Infof("✅ Position closed successfully: symbol=%s, side=%s, result=%v", req.Symbol, req.Side, result)
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Position closed successfully",
-		"symbol":  req.Symbol,
-		"side":    req.Side,
-		"result":  result,
-	})
-}
-
-// handleGetModelConfigs Get AI model configurations
-func (s *Server) handleGetModelConfigs(c *gin.Context) {
-	userID := c.GetString("user_id")
-	logger.Infof("🔍 Querying AI model configs for user %s", userID)
-	models, err := s.store.AIModel().List(userID)
-	if err != nil {
-		logger.Infof("❌ Failed to get AI model configs: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get AI model configs: %v", err)})
-		return
-	}
-	logger.Infof("✅ Found %d AI model configs", len(models))
-
-	// Convert to safe response structure, remove sensitive information
-	safeModels := make([]SafeModelConfig, len(models))
-	for i, model := range models {
-		safeModels[i] = SafeModelConfig{
-			ID:              model.ID,
-			Name:            model.Name,
-			Provider:        model.Provider,
-			Enabled:         model.Enabled,
-			CustomAPIURL:    model.CustomAPIURL,
-			CustomModelName: model.CustomModelName,
-		}
-	}
-
-	c.JSON(http.StatusOK, safeModels)
-}
-
-// handleUpdateModelConfigs Update AI model configurations (encrypted data only)
-func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
-	userID := c.GetString("user_id")
-
-	// Read raw request body
-	bodyBytes, err := c.GetRawData()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
-	}
-
-	// Parse encrypted payload
-	var encryptedPayload crypto.EncryptedPayload
-	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err != nil {
-		logger.Infof("❌ Failed to parse encrypted payload: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format, encrypted transmission required"})
-		return
-	}
-
-	// Verify encrypted data
-	if encryptedPayload.WrappedKey == "" {
-		logger.Infof("❌ Detected unencrypted request (UserID: %s)", userID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "This endpoint only supports encrypted transmission, please use encrypted client",
-			"code":    "ENCRYPTION_REQUIRED",
-			"message": "Encrypted transmission is required for security reasons",
-		})
-		return
-	}
-
-	// Decrypt data
-	decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
-	if err != nil {
-		logger.Infof("❌ Failed to decrypt model config (UserID: %s): %v", userID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to decrypt data"})
-		return
-	}
-
-	// Parse decrypted data
-	var req UpdateModelConfigRequest
-	if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
-		logger.Infof("❌ Failed to parse decrypted data: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse decrypted data"})
-		return
-	}
-	logger.Infof("🔓 Decrypted model config data (UserID: %s)", userID)
-
-	// Update each model's configuration
-	for modelID, modelData := range req.Models {
-		err := s.store.AIModel().Update(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update model %s: %v", modelID, err)})
-			return
-		}
-	}
-
-	// Reload all traders for this user to make new config take effect immediately
-	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to reload user traders into memory: %v", err)
-		// Don't return error here since model config was successfully updated to database
-	}
-
-	logger.Infof("✓ AI model config updated: %+v", req.Models)
-	c.JSON(http.StatusOK, gin.H{"message": "Model configuration updated"})
-}
-
-// handleGetExchangeConfigs Get exchange configurations
-func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
-	userID := c.GetString("user_id")
-	logger.Infof("🔍 Querying exchange configs for user %s", userID)
-	exchanges, err := s.store.Exchange().List(userID)
-	if err != nil {
-		logger.Infof("❌ Failed to get exchange configs: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get exchange configs: %v", err)})
-		return
-	}
-	logger.Infof("✅ Found %d exchange configs", len(exchanges))
-
-	// Convert to safe response structure, remove sensitive information
-	safeExchanges := make([]SafeExchangeConfig, len(exchanges))
-	for i, exchange := range exchanges {
-		safeExchanges[i] = SafeExchangeConfig{
-			ID:                    exchange.ID,
-			Name:                  exchange.Name,
-			Type:                  exchange.Type,
-			Enabled:               exchange.Enabled,
-			Testnet:               exchange.Testnet,
-			HyperliquidWalletAddr: exchange.HyperliquidWalletAddr,
-			AsterUser:             exchange.AsterUser,
-			AsterSigner:           exchange.AsterSigner,
-		}
-	}
-
-	c.JSON(http.StatusOK, safeExchanges)
-}
-
-// handleUpdateExchangeConfigs Update exchange configurations (encrypted data only)
-func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
-	userID := c.GetString("user_id")
-
-	// Read raw request body
-	bodyBytes, err := c.GetRawData()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
-	}
-
-	// Parse encrypted payload
-	var encryptedPayload crypto.EncryptedPayload
-	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err != nil {
-		logger.Infof("❌ Failed to parse encrypted payload: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format, encrypted transmission required"})
-		return
-	}
-
-	// Verify encrypted data
-	if encryptedPayload.WrappedKey == "" {
-		logger.Infof("❌ Detected unencrypted request (UserID: %s)", userID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "This endpoint only supports encrypted transmission, please use encrypted client",
-			"code":    "ENCRYPTION_REQUIRED",
-			"message": "Encrypted transmission is required for security reasons",
-		})
-		return
-	}
-
-	// Decrypt data
-	decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
-	if err != nil {
-		logger.Infof("❌ Failed to decrypt exchange config (UserID: %s): %v", userID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to decrypt data"})
-		return
-	}
-
-	// Parse decrypted data
-	var req UpdateExchangeConfigRequest
-	if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
-		logger.Infof("❌ Failed to parse decrypted data: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse decrypted data"})
-		return
-	}
-	logger.Infof("🔓 Decrypted exchange config data (UserID: %s)", userID)
-
-	// Update each exchange's configuration
-	for exchangeID, exchangeData := range req.Exchanges {
-		err := s.store.Exchange().Update(userID, exchangeID, exchangeData.Enabled, exchangeData.APIKey, exchangeData.SecretKey, exchangeData.Passphrase, exchangeData.Testnet, exchangeData.HyperliquidWalletAddr, exchangeData.AsterUser, exchangeData.AsterSigner, exchangeData.AsterPrivateKey, exchangeData.LighterWalletAddr, exchangeData.LighterPrivateKey, exchangeData.LighterAPIKeyPrivateKey)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update exchange %s: %v", exchangeID, err)})
-			return
-		}
-	}
-
-	// Reload all traders for this user to make new config take effect immediately
-	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to reload user traders into memory: %v", err)
-		// Don't return error here since exchange config was successfully updated to database
-	}
-
-	logger.Infof("✓ Exchange config updated: %+v", req.Exchanges)
-	c.JSON(http.StatusOK, gin.H{"message": "Exchange configuration updated"})
-}
-
-// handleTraderList Trader list
-func (s *Server) handleTraderList(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traders, err := s.store.Trader().List(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get trader list: %v", err)})
-		return
-	}
-
-	result := make([]map[string]interface{}, 0, len(traders))
-	for _, trader := range traders {
-		// Get real-time running status
-		isRunning := trader.IsRunning
-		if at, err := s.traderManager.GetTrader(trader.ID); err == nil {
-			status := at.GetStatus()
-			if running, ok := status["is_running"].(bool); ok {
-				isRunning = running
-			}
-		}
-
-		// Return complete AIModelID (e.g. "admin_deepseek"), don't truncate
-		// Frontend needs complete ID to verify model exists (consistent with handleGetTraderConfig)
-		result = append(result, map[string]interface{}{
-			"trader_id":       trader.ID,
-			"trader_name":     trader.Name,
-			"ai_model":        trader.AIModelID, // Use complete ID
-			"exchange_id":     trader.ExchangeID,
-			"is_running":      isRunning,
-			"initial_balance": trader.InitialBalance,
-		})
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// handleGetTraderConfig Get trader detailed configuration
-func (s *Server) handleGetTraderConfig(c *gin.Context) {
-	userID := c.GetString("user_id")
-	traderID := c.Param("id")
-
-	if traderID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader ID cannot be empty"})
-		return
-	}
-
-	fullCfg, err := s.store.Trader().GetFullConfig(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Failed to get trader config: %v", err)})
-		return
-	}
-	traderConfig := fullCfg.Trader
-
-	// Get real-time running status
-	isRunning := traderConfig.IsRunning
-	if at, err := s.traderManager.GetTrader(traderID); err == nil {
-		status := at.GetStatus()
-		if running, ok := status["is_running"].(bool); ok {
-			isRunning = running
-		}
-	}
-
-	// Return complete model ID without conversion, consistent with frontend model list
-	aiModelID := traderConfig.AIModelID
-
-	result := map[string]interface{}{
-		"trader_id":             traderConfig.ID,
-		"trader_name":           traderConfig.Name,
-		"ai_model":              aiModelID,
-		"exchange_id":           traderConfig.ExchangeID,
-		"initial_balance":       traderConfig.InitialBalance,
-		"scan_interval_minutes": traderConfig.ScanIntervalMinutes,
-		"btc_eth_leverage":      traderConfig.BTCETHLeverage,
-		"altcoin_leverage":      traderConfig.AltcoinLeverage,
-		"trading_symbols":       traderConfig.TradingSymbols,
-		"custom_prompt":         traderConfig.CustomPrompt,
-		"override_base_prompt":  traderConfig.OverrideBasePrompt,
-		"is_cross_margin":       traderConfig.IsCrossMargin,
-		"use_coin_pool":         traderConfig.UseCoinPool,
-		"use_oi_top":            traderConfig.UseOITop,
-		"is_running":            isRunning,
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// handleStatus System status
-func (s *Server) handleStatus(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	status := trader.GetStatus()
-	c.JSON(http.StatusOK, status)
-}
-
-// handleAccount Account information
-func (s *Server) handleAccount(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	logger.Infof("📊 Received account info request [%s]", trader.GetName())
-	account, err := trader.GetAccountInfo()
-	if err != nil {
-		logger.Infof("❌ Failed to get account info [%s]: %v", trader.GetName(), err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get account info: %v", err),
-		})
-		return
-	}
-
-	logger.Infof("✓ Returning account info [%s]: equity=%.2f, available=%.2f, pnl=%.2f (%.2f%%)",
-		trader.GetName(),
-		account["total_equity"],
-		account["available_balance"],
-		account["total_pnl"],
-		account["total_pnl_pct"])
-	c.JSON(http.StatusOK, account)
-}
-
-// handlePositions Position list
-func (s *Server) handlePositions(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	positions, err := trader.GetPositions()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get position list: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, positions)
-}
-
-// handleDecisions Decision log list
-func (s *Server) handleDecisions(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get all historical decision records (unlimited)
-	records, err := trader.GetStore().Decision().GetLatestRecords(trader.GetID(), 10000)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get decision log: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, records)
-}
-
-// handleLatestDecisions Latest decision logs (most recent 5, newest first)
-func (s *Server) handleLatestDecisions(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	records, err := trader.GetStore().Decision().GetLatestRecords(trader.GetID(), 5)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get decision log: %v", err),
-		})
-		return
-	}
-
-	// Reverse array to put newest first (for list display)
-	// GetLatestRecords returns oldest to newest (for charts), here we need newest to oldest
-	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
-		records[i], records[j] = records[j], records[i]
-	}
-
-	c.JSON(http.StatusOK, records)
-}
-
-// handleStatistics Statistics information
-func (s *Server) handleStatistics(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-
-	stats, err := trader.GetStore().Decision().GetStatistics(trader.GetID())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get statistics: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, stats)
-}
-
-// handleCompetition Competition overview (compare all traders)
-func (s *Server) handleCompetition(c *gin.Context) {
-	userID := c.GetString("user_id")
-
-	// Ensure user's traders are loaded into memory
-	err := s.traderManager.LoadUserTradersFromStore(s.store, userID)
-	if err != nil {
-		logger.Infof("⚠️ Failed to load traders for user %s: %v", userID, err)
-	}
-
-	competition, err := s.traderManager.GetCompetitionData()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get competition data: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, competition)
-}
-
-// handleEquityHistory Return rate historical data
-// Query directly from database, not dependent on trader in memory (so historical data can be retrieved after restart)
-func (s *Server) handleEquityHistory(c *gin.Context) {
-	_, traderID, err := s.getTraderFromQuery(c)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get equity historical data from new equity table
-	// Every 3 minutes per cycle: 10000 records = about 20 days of data
-	snapshots, err := s.store.Equity().GetLatest(traderID, 10000)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get historical data: %v", err),
-		})
-		return
-	}
-
-	if len(snapshots) == 0 {
-		c.JSON(http.StatusOK, []interface{}{})
-		return
-	}
-
-	// Build return rate historical data points
-	type EquityPoint struct {
-		Timestamp        string  `json:"timestamp"`
-		TotalEquity      float64 `json:"total_equity"`      // Account equity (wallet + unrealized)
-		AvailableBalance float64 `json:"available_balance"` // Available balance
-		TotalPnL         float64 `json:"total_pnl"`         // Total PnL (unrealized PnL)
-		TotalPnLPct      float64 `json:"total_pnl_pct"`     // Total PnL percentage
-		PositionCount    int     `json:"position_count"`    // Position count
-		MarginUsedPct    float64 `json:"margin_used_pct"`   // Margin used percentage
-	}
-
-	// Use the balance of the first record as initial balance to calculate return rate
-	initialBalance := snapshots[0].Balance
-	if initialBalance == 0 {
-		initialBalance = 1 // Avoid division by zero
-	}
-
-	var history []EquityPoint
-	for _, snap := range snapshots {
-		// Calculate PnL percentage
-		totalPnLPct := 0.0
-		if initialBalance > 0 {
-			totalPnLPct = (snap.UnrealizedPnL / initialBalance) * 100
-		}
-
-		history = append(history, EquityPoint{
-			Timestamp:        snap.Timestamp.Format("2006-01-02 15:04:05"),
-			TotalEquity:      snap.TotalEquity,
-			AvailableBalance: snap.Balance,
-			TotalPnL:         snap.UnrealizedPnL,
-			TotalPnLPct:      totalPnLPct,
-			PositionCount:    snap.PositionCount,
-			MarginUsedPct:    snap.MarginUsedPct,
-		})
-	}
-
-	c.JSON(http.StatusOK, history)
-}
-
 // authMiddleware JWT authentication middleware
 func (s *Server) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -1713,7 +568,8 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		// Validate JWT token
 		claims, err := auth.ValidateJWT(tokenString)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: " + err.Error()})
+			logger.Errorf("[Auth] Invalid token: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 			c.Abort()
 			return
 		}
@@ -1723,315 +579,6 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		c.Set("email", claims.Email)
 		c.Next()
 	}
-}
-
-// handleLogout Add current token to blacklist
-func (s *Server) handleLogout(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing Authorization header"})
-		return
-	}
-	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || parts[0] != "Bearer" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization format"})
-		return
-	}
-	tokenString := parts[1]
-	claims, err := auth.ValidateJWT(tokenString)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
-		return
-	}
-	var exp time.Time
-	if claims.ExpiresAt != nil {
-		exp = claims.ExpiresAt.Time
-	} else {
-		exp = time.Now().Add(24 * time.Hour)
-	}
-	auth.BlacklistToken(tokenString, exp)
-	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
-}
-
-// handleRegister Handle user registration request
-func (s *Server) handleRegister(c *gin.Context) {
-	// Check if registration is allowed
-	if !config.Get().RegistrationEnabled {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Registration is disabled"})
-		return
-	}
-
-	var req struct {
-		Email    string `json:"email" binding:"required,email"`
-		Password string `json:"password" binding:"required,min=6"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Check if email already exists
-	_, err := s.store.User().GetByEmail(req.Email)
-	if err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Email already registered"})
-		return
-	}
-
-	// Generate password hash
-	passwordHash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Password processing failed"})
-		return
-	}
-
-	// Generate OTP secret
-	otpSecret, err := auth.GenerateOTPSecret()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "OTP secret generation failed"})
-		return
-	}
-
-	// Create user (unverified OTP status)
-	userID := uuid.New().String()
-	user := &store.User{
-		ID:           userID,
-		Email:        req.Email,
-		PasswordHash: passwordHash,
-		OTPSecret:    otpSecret,
-		OTPVerified:  false,
-	}
-
-	err = s.store.User().Create(user)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user: " + err.Error()})
-		return
-	}
-
-	// Return OTP setup information
-	qrCodeURL := auth.GetOTPQRCodeURL(otpSecret, req.Email)
-	c.JSON(http.StatusOK, gin.H{
-		"user_id":     userID,
-		"email":       req.Email,
-		"otp_secret":  otpSecret,
-		"qr_code_url": qrCodeURL,
-		"message":     "Please scan the QR code with Google Authenticator and verify OTP",
-	})
-}
-
-// handleCompleteRegistration Complete registration (verify OTP)
-func (s *Server) handleCompleteRegistration(c *gin.Context) {
-	var req struct {
-		UserID  string `json:"user_id" binding:"required"`
-		OTPCode string `json:"otp_code" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get user information
-	user, err := s.store.User().GetByID(req.UserID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User does not exist"})
-		return
-	}
-
-	// Verify OTP
-	if !auth.VerifyOTP(user.OTPSecret, req.OTPCode) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "OTP code error"})
-		return
-	}
-
-	// Update user OTP verified status
-	err = s.store.User().UpdateOTPVerified(req.UserID, true)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user status"})
-		return
-	}
-
-	// Generate JWT token
-	token, err := auth.GenerateJWT(user.ID, user.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	// Initialize default model and exchange configs for user
-	err = s.initUserDefaultConfigs(user.ID)
-	if err != nil {
-		logger.Infof("Failed to initialize user default configs: %v", err)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token":   token,
-		"user_id": user.ID,
-		"email":   user.Email,
-		"message": "Registration completed",
-	})
-}
-
-// handleLogin Handle user login request
-func (s *Server) handleLogin(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email" binding:"required,email"`
-		Password string `json:"password" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get user information
-	user, err := s.store.User().GetByEmail(req.Email)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email or password incorrect"})
-		return
-	}
-
-	// Verify password
-	if !auth.CheckPassword(req.Password, user.PasswordHash) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email or password incorrect"})
-		return
-	}
-
-	// Check if OTP is verified
-	if !user.OTPVerified {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":              "Account has not completed OTP setup",
-			"user_id":            user.ID,
-			"requires_otp_setup": true,
-		})
-		return
-	}
-
-	// Return status requiring OTP verification
-	c.JSON(http.StatusOK, gin.H{
-		"user_id":      user.ID,
-		"email":        user.Email,
-		"message":      "Please enter Google Authenticator code",
-		"requires_otp": true,
-	})
-}
-
-// handleVerifyOTP Verify OTP and complete login
-func (s *Server) handleVerifyOTP(c *gin.Context) {
-	var req struct {
-		UserID  string `json:"user_id" binding:"required"`
-		OTPCode string `json:"otp_code" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Get user information
-	user, err := s.store.User().GetByID(req.UserID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User does not exist"})
-		return
-	}
-
-	// Verify OTP
-	if !auth.VerifyOTP(user.OTPSecret, req.OTPCode) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Verification code error"})
-		return
-	}
-
-	// Generate JWT token
-	token, err := auth.GenerateJWT(user.ID, user.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token":   token,
-		"user_id": user.ID,
-		"email":   user.Email,
-		"message": "Login successful",
-	})
-}
-
-// handleResetPassword Reset password (via email + OTP verification)
-func (s *Server) handleResetPassword(c *gin.Context) {
-	var req struct {
-		Email       string `json:"email" binding:"required,email"`
-		NewPassword string `json:"new_password" binding:"required,min=6"`
-		OTPCode     string `json:"otp_code" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Query user
-	user, err := s.store.User().GetByEmail(req.Email)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Email does not exist"})
-		return
-	}
-
-	// Verify OTP
-	if !auth.VerifyOTP(user.OTPSecret, req.OTPCode) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Google Authenticator code error"})
-		return
-	}
-
-	// Generate new password hash
-	newPasswordHash, err := auth.HashPassword(req.NewPassword)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Password processing failed"})
-		return
-	}
-
-	// Update password
-	err = s.store.User().UpdatePassword(user.ID, newPasswordHash)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Password update failed"})
-		return
-	}
-
-	logger.Infof("✓ User %s password has been reset", user.Email)
-	c.JSON(http.StatusOK, gin.H{"message": "Password reset successful, please login with new password"})
-}
-
-// initUserDefaultConfigs Initialize default model and exchange configs for new user
-func (s *Server) initUserDefaultConfigs(userID string) error {
-	// Commented out auto-creation of default configs, let users add manually
-	// This way new users won't have config items automatically after registration
-	logger.Infof("User %s registration completed, waiting for manual AI model and exchange configuration", userID)
-	return nil
-}
-
-// handleGetSupportedModels Get list of AI models supported by the system
-func (s *Server) handleGetSupportedModels(c *gin.Context) {
-	// Return static list of supported AI models
-	supportedModels := []map[string]interface{}{
-		{"id": "deepseek", "name": "DeepSeek", "provider": "deepseek"},
-		{"id": "qwen", "name": "Qwen", "provider": "qwen"},
-	}
-
-	c.JSON(http.StatusOK, supportedModels)
-}
-
-// handleGetSupportedExchanges Get list of exchanges supported by the system
-func (s *Server) handleGetSupportedExchanges(c *gin.Context) {
-	// Return static list of supported exchanges
-	supportedExchanges := []SafeExchangeConfig{
-		{ID: "binance", Name: "Binance Futures", Type: "binance"},
-		{ID: "bybit", Name: "Bybit Futures", Type: "bybit"},
-		{ID: "okx", Name: "OKX Futures", Type: "okx"},
-		{ID: "hyperliquid", Name: "Hyperliquid", Type: "hyperliquid"},
-		{ID: "aster", Name: "Aster DEX", Type: "aster"},
-		{ID: "lighter", Name: "LIGHTER DEX", Type: "lighter"},
-	}
-
-	c.JSON(http.StatusOK, supportedExchanges)
 }
 
 // Start Start server
@@ -2080,269 +627,7 @@ func (s *Server) Shutdown() error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-// handleGetPromptTemplates Get all system prompt template list
-func (s *Server) handleGetPromptTemplates(c *gin.Context) {
-	// Import decision package
-	templates := decision.GetAllPromptTemplates()
-
-	// Convert to response format
-	response := make([]map[string]interface{}, 0, len(templates))
-	for _, tmpl := range templates {
-		response = append(response, map[string]interface{}{
-			"name": tmpl.Name,
-		})
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"templates": response,
-	})
-}
-
-// handleGetPromptTemplate Get prompt template content by specified name
-func (s *Server) handleGetPromptTemplate(c *gin.Context) {
-	templateName := c.Param("name")
-
-	template, err := decision.GetPromptTemplate(templateName)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Template does not exist: %s", templateName)})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"name":    template.Name,
-		"content": template.Content,
-	})
-}
-
-// handlePublicTraderList Get public trader list (no authentication required)
-func (s *Server) handlePublicTraderList(c *gin.Context) {
-	// Get trader information from all users
-	competition, err := s.traderManager.GetCompetitionData()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get trader list: %v", err),
-		})
-		return
-	}
-
-	// Get traders array
-	tradersData, exists := competition["traders"]
-	if !exists {
-		c.JSON(http.StatusOK, []map[string]interface{}{})
-		return
-	}
-
-	traders, ok := tradersData.([]map[string]interface{})
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Trader data format error",
-		})
-		return
-	}
-
-	// Return trader basic information, filter sensitive information
-	result := make([]map[string]interface{}, 0, len(traders))
-	for _, trader := range traders {
-		result = append(result, map[string]interface{}{
-			"trader_id":       trader["trader_id"],
-			"trader_name":     trader["trader_name"],
-			"ai_model":        trader["ai_model"],
-			"exchange":        trader["exchange"],
-			"is_running":      trader["is_running"],
-			"total_equity":    trader["total_equity"],
-			"total_pnl":       trader["total_pnl"],
-			"total_pnl_pct":   trader["total_pnl_pct"],
-			"position_count":  trader["position_count"],
-			"margin_used_pct": trader["margin_used_pct"],
-		})
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-// handlePublicCompetition Get public competition data (no authentication required)
-func (s *Server) handlePublicCompetition(c *gin.Context) {
-	competition, err := s.traderManager.GetCompetitionData()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get competition data: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, competition)
-}
-
-// handleTopTraders Get top 5 trader data (no authentication required, for performance comparison)
-func (s *Server) handleTopTraders(c *gin.Context) {
-	topTraders, err := s.traderManager.GetTopTradersData()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to get top 10 trader data: %v", err),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, topTraders)
-}
-
-// handleEquityHistoryBatch Batch get return rate historical data for multiple traders (no authentication required, for performance comparison)
-func (s *Server) handleEquityHistoryBatch(c *gin.Context) {
-	var requestBody struct {
-		TraderIDs []string `json:"trader_ids"`
-	}
-
-	// Try to parse POST request JSON body
-	if err := c.ShouldBindJSON(&requestBody); err != nil {
-		// If JSON parse fails, try to get from query parameters (compatible with GET request)
-		traderIDsParam := c.Query("trader_ids")
-		if traderIDsParam == "" {
-			// If no trader_ids specified, return historical data for top 5
-			topTraders, err := s.traderManager.GetTopTradersData()
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": fmt.Sprintf("Failed to get top 5 traders: %v", err),
-				})
-				return
-			}
-
-			traders, ok := topTraders["traders"].([]map[string]interface{})
-			if !ok {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Trader data format error"})
-				return
-			}
-
-			// Extract trader IDs
-			traderIDs := make([]string, 0, len(traders))
-			for _, trader := range traders {
-				if traderID, ok := trader["trader_id"].(string); ok {
-					traderIDs = append(traderIDs, traderID)
-				}
-			}
-
-			result := s.getEquityHistoryForTraders(traderIDs)
-			c.JSON(http.StatusOK, result)
-			return
-		}
-
-		// Parse comma-separated trader IDs
-		requestBody.TraderIDs = strings.Split(traderIDsParam, ",")
-		for i := range requestBody.TraderIDs {
-			requestBody.TraderIDs[i] = strings.TrimSpace(requestBody.TraderIDs[i])
-		}
-	}
-
-	// Limit to maximum 20 traders to prevent oversized requests
-	if len(requestBody.TraderIDs) > 20 {
-		requestBody.TraderIDs = requestBody.TraderIDs[:20]
-	}
-
-	result := s.getEquityHistoryForTraders(requestBody.TraderIDs)
-	c.JSON(http.StatusOK, result)
-}
-
-// getEquityHistoryForTraders Get historical data for multiple traders
-// Query directly from database, not dependent on trader in memory (so historical data can be retrieved after restart)
-func (s *Server) getEquityHistoryForTraders(traderIDs []string) map[string]interface{} {
-	result := make(map[string]interface{})
-	histories := make(map[string]interface{})
-	errors := make(map[string]string)
-
-	// Pre-fetch initial balances for all traders
-	initialBalances := make(map[string]float64)
-	for _, traderID := range traderIDs {
-		if traderID == "" {
-			continue
-		}
-		// Get trader's initial balance from database (use GetByID which doesn't require userID)
-		trader, err := s.store.Trader().GetByID(traderID)
-		if err == nil && trader != nil && trader.InitialBalance > 0 {
-			initialBalances[traderID] = trader.InitialBalance
-		}
-	}
-
-	for _, traderID := range traderIDs {
-		if traderID == "" {
-			continue
-		}
-
-		// Get equity historical data from new equity table
-		snapshots, err := s.store.Equity().GetLatest(traderID, 500)
-		if err != nil {
-			errors[traderID] = fmt.Sprintf("Failed to get historical data: %v", err)
-			continue
-		}
-
-		if len(snapshots) == 0 {
-			// No historical records, return empty array
-			histories[traderID] = []map[string]interface{}{}
-			continue
-		}
-
-		// Get initial balance for calculating PnL percentage
-		initialBalance := initialBalances[traderID]
-		if initialBalance <= 0 {
-			// If no initial balance configured, use the first snapshot's equity as baseline
-			initialBalance = snapshots[0].TotalEquity
-		}
-
-		// Build return rate historical data with PnL percentage
-		history := make([]map[string]interface{}, 0, len(snapshots))
-		for _, snap := range snapshots {
-			// Calculate PnL percentage: (current_equity - initial_balance) / initial_balance * 100
-			pnlPct := 0.0
-			if initialBalance > 0 {
-				pnlPct = (snap.TotalEquity - initialBalance) / initialBalance * 100
-			}
-
-			history = append(history, map[string]interface{}{
-				"timestamp":     snap.Timestamp,
-				"total_equity":  snap.TotalEquity,
-				"total_pnl":     snap.UnrealizedPnL,
-				"total_pnl_pct": pnlPct,
-				"balance":       snap.Balance,
-			})
-		}
-
-		histories[traderID] = history
-	}
-
-	result["histories"] = histories
-	result["count"] = len(histories)
-	if len(errors) > 0 {
-		result["errors"] = errors
-	}
-
-	return result
-}
-
-// handleGetPublicTraderConfig Get public trader configuration information (no authentication required, does not include sensitive information)
-func (s *Server) handleGetPublicTraderConfig(c *gin.Context) {
-	traderID := c.Param("id")
-	if traderID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Trader ID cannot be empty"})
-		return
-	}
-
-	trader, err := s.traderManager.GetTrader(traderID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist"})
-		return
-	}
-
-	// Get trader status information
-	status := trader.GetStatus()
-
-	// Only return public configuration information, not including sensitive data like API keys
-	result := map[string]interface{}{
-		"trader_id":   trader.GetID(),
-		"trader_name": trader.GetName(),
-		"ai_model":    trader.GetAIModel(),
-		"exchange":    trader.GetExchange(),
-		"is_running":  status["is_running"],
-		"ai_provider": status["ai_provider"],
-		"start_time":  status["start_time"],
-	}
-
-	c.JSON(http.StatusOK, result)
+// SetTelegramReloadCh sets the channel used to signal the Telegram bot to reload
+func (s *Server) SetTelegramReloadCh(ch chan<- struct{}) {
+	s.telegramReloadCh = ch
 }

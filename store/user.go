@@ -1,156 +1,126 @@
 package store
 
 import (
-	"crypto/rand"
-	"database/sql"
-	"encoding/base32"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // UserStore user storage
 type UserStore struct {
-	db *sql.DB
+	db *gorm.DB
 }
 
-// User user
+// User user model
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	OTPSecret    string    `json:"-"`
-	OTPVerified  bool      `json:"otp_verified"`
+	ID           string    `gorm:"primaryKey" json:"id"`
+	Email        string    `gorm:"uniqueIndex:idx_users_email;not null" json:"email"`
+	PasswordHash string    `gorm:"column:password_hash;not null" json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// GenerateOTPSecret generates OTP secret
-func GenerateOTPSecret() (string, error) {
-	secret := make([]byte, 20)
-	_, err := rand.Read(secret)
-	if err != nil {
-		return "", err
-	}
-	return base32.StdEncoding.EncodeToString(secret), nil
+func (User) TableName() string { return "users" }
+
+// NewUserStore creates a new UserStore
+func NewUserStore(db *gorm.DB) *UserStore {
+	return &UserStore{db: db}
 }
 
 func (s *UserStore) initTables() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS users (
-			id TEXT PRIMARY KEY,
-			email TEXT UNIQUE NOT NULL,
-			password_hash TEXT NOT NULL,
-			otp_secret TEXT,
-			otp_verified BOOLEAN DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		return err
-	}
+	// For PostgreSQL with existing table, skip AutoMigrate to avoid index conflicts
+	if s.db.Dialector.Name() == "postgres" {
+		var tableExists int64
+		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'`).Scan(&tableExists)
 
-	// Trigger
-	_, err = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS update_users_updated_at
-		AFTER UPDATE ON users
-		BEGIN
-			UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-		END
-	`)
-	if err != nil {
-		return err
-	}
+		if tableExists > 0 {
+			// Table exists - manually ensure all columns exist
+			// Core columns (should already exist)
+			s.db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`)
+			s.db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT ''`)
+			s.db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
+			s.db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
 
-	return nil
+			// Ensure unique index exists on email (don't care about the name)
+			var indexExists int64
+			s.db.Raw(`
+				SELECT COUNT(*) FROM pg_indexes
+				WHERE tablename = 'users' AND indexdef LIKE '%email%' AND indexdef LIKE '%UNIQUE%'
+			`).Scan(&indexExists)
+
+			if indexExists == 0 {
+				s.db.Exec("CREATE UNIQUE INDEX idx_users_email ON users(email)")
+			}
+
+			return nil
+		}
+	}
+	return s.db.AutoMigrate(&User{})
 }
 
 // Create creates user
 func (s *UserStore) Create(user *User) error {
-	_, err := s.db.Exec(`
-		INSERT INTO users (id, email, password_hash, otp_secret, otp_verified)
-		VALUES (?, ?, ?, ?, ?)
-	`, user.ID, user.Email, user.PasswordHash, user.OTPSecret, user.OTPVerified)
-	return err
+	return s.db.Create(user).Error
 }
 
 // GetByEmail gets user by email
 func (s *UserStore) GetByEmail(email string) (*User, error) {
 	var user User
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, email, password_hash, otp_secret, otp_verified, created_at, updated_at
-		FROM users WHERE email = ?
-	`, email).Scan(
-		&user.ID, &user.Email, &user.PasswordHash, &user.OTPSecret,
-		&user.OTPVerified, &createdAt, &updatedAt,
-	)
+	err := s.db.Where("email = ?", email).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
-	user.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	user.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 	return &user, nil
 }
 
 // GetByID gets user by ID
 func (s *UserStore) GetByID(userID string) (*User, error) {
 	var user User
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(`
-		SELECT id, email, password_hash, otp_secret, otp_verified, created_at, updated_at
-		FROM users WHERE id = ?
-	`, userID).Scan(
-		&user.ID, &user.Email, &user.PasswordHash, &user.OTPSecret,
-		&user.OTPVerified, &createdAt, &updatedAt,
-	)
+	err := s.db.Where("id = ?", userID).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
-	user.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	user.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 	return &user, nil
+}
+
+// Count returns the total number of users
+func (s *UserStore) Count() (int, error) {
+	var count int64
+	err := s.db.Model(&User{}).Count(&count).Error
+	return int(count), err
 }
 
 // GetAllIDs gets all user IDs
 func (s *UserStore) GetAllIDs() ([]string, error) {
-	rows, err := s.db.Query(`SELECT id FROM users ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var userIDs []string
-	for rows.Next() {
-		var userID string
-		if err := rows.Scan(&userID); err != nil {
-			return nil, err
-		}
-		userIDs = append(userIDs, userID)
-	}
-	return userIDs, nil
+	err := s.db.Model(&User{}).Order("id").Pluck("id", &userIDs).Error
+	return userIDs, err
 }
 
-// UpdateOTPVerified updates OTP verification status
-func (s *UserStore) UpdateOTPVerified(userID string, verified bool) error {
-	_, err := s.db.Exec(`UPDATE users SET otp_verified = ? WHERE id = ?`, verified, userID)
-	return err
+// GetAll returns all users ordered by creation time.
+func (s *UserStore) GetAll() ([]User, error) {
+	var users []User
+	err := s.db.Model(&User{}).Order("created_at").Find(&users).Error
+	return users, err
 }
 
 // UpdatePassword updates password
 func (s *UserStore) UpdatePassword(userID, passwordHash string) error {
-	_, err := s.db.Exec(`
-		UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
-	`, passwordHash, userID)
-	return err
+	return s.db.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"password_hash": passwordHash,
+		"updated_at":    time.Now().UTC(),
+	}).Error
+}
+
+// DeleteAll deletes all users (reset system to uninitialized state)
+func (s *UserStore) DeleteAll() error {
+	return s.db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&User{}).Error
 }
 
 // EnsureAdmin ensures admin user exists
 func (s *UserStore) EnsureAdmin() error {
-	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = 'admin'`).Scan(&count)
-	if err != nil {
-		return err
-	}
+	var count int64
+	s.db.Model(&User{}).Where("id = ?", "admin").Count(&count)
 	if count > 0 {
 		return nil
 	}
@@ -158,7 +128,5 @@ func (s *UserStore) EnsureAdmin() error {
 		ID:           "admin",
 		Email:        "admin@localhost",
 		PasswordHash: "",
-		OTPSecret:    "",
-		OTPVerified:  true,
 	})
 }
